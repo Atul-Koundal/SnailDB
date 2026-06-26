@@ -21,6 +21,11 @@ pub enum Token {
     Asc,
     Desc,
     Limit,
+    Join,
+    Inner,
+    Left,
+    Right,
+    On,
 
     // ── Identifiers & literals ────────────────────────────────────────
     Ident(String),
@@ -33,6 +38,7 @@ pub enum Token {
     Comma,
     Semicolon,
     Star,
+    Dot,
 
     // ── Operators ─────────────────────────────────────────────────────
     Eq,

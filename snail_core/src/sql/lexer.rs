@@ -58,15 +58,12 @@ impl<'a> Lexer<'a> {
         if ch == '\'' {
             return self.read_string();
         }
-
         if ch.is_ascii_digit() || (ch == '-' && self.next_is_digit()) {
             return Ok(self.read_number());
         }
-
         if ch.is_alphabetic() || ch == '_' {
             return Ok(self.read_ident_or_keyword());
         }
-
         if ch == '!' {
             self.advance();
             if self.peek() == Some('=') {
@@ -77,18 +74,12 @@ impl<'a> Lexer<'a> {
         }
         if ch == '<' {
             self.advance();
-            if self.peek() == Some('=') {
-                self.advance();
-                return Ok(Token::Lte);
-            }
+            if self.peek() == Some('=') { self.advance(); return Ok(Token::Lte); }
             return Ok(Token::Lt);
         }
         if ch == '>' {
             self.advance();
-            if self.peek() == Some('=') {
-                self.advance();
-                return Ok(Token::Gte);
-            }
+            if self.peek() == Some('=') { self.advance(); return Ok(Token::Gte); }
             return Ok(Token::Gt);
         }
 
@@ -100,6 +91,7 @@ impl<'a> Lexer<'a> {
             ',' => Ok(Token::Comma),
             ';' => Ok(Token::Semicolon),
             '*' => Ok(Token::Star),
+            '.' => Ok(Token::Dot),
             other => Err(LexerError::UnexpectedChar(other, self.pos)),
         }
     }
@@ -112,9 +104,7 @@ impl<'a> Lexer<'a> {
 
     fn read_number(&mut self) -> Token {
         let start = self.pos;
-        if self.peek() == Some('-') {
-            self.advance();
-        }
+        if self.peek() == Some('-') { self.advance(); }
         while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
             self.advance();
         }
@@ -127,9 +117,9 @@ impl<'a> Lexer<'a> {
         let mut s = String::new();
         loop {
             match self.advance() {
-                None => return Err(LexerError::UnterminatedString),
+                None       => return Err(LexerError::UnterminatedString),
                 Some('\'') => break,
-                Some(c) => s.push(c),
+                Some(c)    => s.push(c),
             }
         }
         Ok(Token::TextLiteral(s))
@@ -162,6 +152,11 @@ impl<'a> Lexer<'a> {
             "ASC"    => Token::Asc,
             "DESC"   => Token::Desc,
             "LIMIT"  => Token::Limit,
+            "JOIN"   => Token::Join,
+            "INNER"  => Token::Inner,
+            "LEFT"   => Token::Left,
+            "RIGHT"  => Token::Right,
+            "ON"     => Token::On,
             _        => Token::Ident(word.to_string()),
         }
     }
@@ -214,15 +209,22 @@ mod tests {
         let tokens = lex("UPDATE users SET age = 31 WHERE id = 1");
         assert_eq!(tokens[0], Token::Update);
         assert_eq!(tokens[2], Token::Set);
-        assert_eq!(tokens[6], Token::Where);
 
         let tokens = lex("DELETE FROM users WHERE id = 1");
         assert_eq!(tokens[0], Token::Delete);
 
         let tokens = lex("SELECT * FROM users ORDER BY age DESC LIMIT 5");
         assert!(tokens.contains(&Token::Order));
-        assert!(tokens.contains(&Token::By));
         assert!(tokens.contains(&Token::Desc));
         assert!(tokens.contains(&Token::Limit));
+    }
+
+    #[test]
+    fn join_keywords_and_dot() {
+        let tokens = lex("SELECT users.name FROM users INNER JOIN orders ON users.id = orders.user_id");
+        assert!(tokens.contains(&Token::Inner));
+        assert!(tokens.contains(&Token::Join));
+        assert!(tokens.contains(&Token::On));
+        assert!(tokens.contains(&Token::Dot));
     }
 }

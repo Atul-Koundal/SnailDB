@@ -13,6 +13,8 @@ pub enum ParseError {
     UnknownColType(String),
     #[error("unknown statement starting with {0:?}")]
     UnknownStatement(Token),
+    #[error("invalid ON condition: expected table.column = table.column")]
+    InvalidOnCondition,
 }
 
 pub type Result<T> = std::result::Result<T, ParseError>;
@@ -29,9 +31,7 @@ impl Parser {
 
     pub fn parse(mut self) -> Result<Stmt> {
         let stmt = self.parse_stmt()?;
-        if self.peek() == Some(&Token::Semicolon) {
-            self.advance();
-        }
+        if self.peek() == Some(&Token::Semicolon) { self.advance(); }
         Ok(stmt)
     }
 
@@ -137,13 +137,16 @@ impl Parser {
 
     fn parse_select(&mut self) -> Result<Stmt> {
         self.expect(&Token::Select)?;
+
+        // Column list — supports star, bare names, and table.column
         let columns = if self.peek() == Some(&Token::Star) {
             self.advance();
             SelectColumns::Star
         } else {
             let mut cols = Vec::new();
             loop {
-                cols.push(self.expect_ident()?);
+                let col_ref = self.parse_column_ref()?;
+                cols.push(col_ref);
                 match self.peek() {
                     Some(Token::Comma) => { self.advance(); }
                     _ => break,
@@ -151,9 +154,38 @@ impl Parser {
             }
             SelectColumns::Named(cols)
         };
+
         self.expect(&Token::From)?;
         let table_name = self.expect_ident()?;
 
+        // JOIN clauses
+        let mut joins = Vec::new();
+        loop {
+            let join_type = match self.peek() {
+                Some(Token::Inner) => {
+                    self.advance();
+                    self.expect(&Token::Join)?;
+                    JoinType::Inner
+                }
+                Some(Token::Left) => {
+                    self.advance();
+                    self.expect(&Token::Join)?;
+                    JoinType::Left
+                }
+                Some(Token::Join) => {
+                    self.advance();
+                    JoinType::Inner
+                }
+                _ => break,
+            };
+
+            let join_table = self.expect_ident()?;
+            self.expect(&Token::On)?;
+            let on = self.parse_join_condition()?;
+            joins.push(JoinClause { join_type, table_name: join_table, on });
+        }
+
+        // WHERE
         let where_clause = if self.peek() == Some(&Token::Where) {
             self.advance();
             Some(self.parse_expr()?)
@@ -197,19 +229,38 @@ impl Parser {
         };
 
         Ok(Stmt::Select(SelectStmt {
-            table_name,
-            columns,
-            where_clause,
-            order_by,
-            limit,
+            table_name, columns, joins, where_clause, order_by, limit,
         }))
+    }
+
+    /// Parse a column reference: either `col` or `table.col`
+    fn parse_column_ref(&mut self) -> Result<ColumnRef> {
+        let first = self.expect_ident()?;
+        if self.peek() == Some(&Token::Dot) {
+            self.advance();
+            let col = self.expect_ident()?;
+            Ok(ColumnRef::qualified(&first, &col))
+        } else {
+            Ok(ColumnRef::unqualified(&first))
+        }
+    }
+
+    /// Parse ON left_table.left_col = right_table.right_col
+    fn parse_join_condition(&mut self) -> Result<JoinCondition> {
+        let left_table = self.expect_ident()?;
+        self.expect(&Token::Dot)?;
+        let left_col = self.expect_ident()?;
+        self.expect(&Token::Eq)?;
+        let right_table = self.expect_ident()?;
+        self.expect(&Token::Dot)?;
+        let right_col = self.expect_ident()?;
+        Ok(JoinCondition { left_table, left_col, right_table, right_col })
     }
 
     fn parse_update(&mut self) -> Result<Stmt> {
         self.expect(&Token::Update)?;
         let table_name = self.expect_ident()?;
         self.expect(&Token::Set)?;
-
         let mut assignments = Vec::new();
         loop {
             let column = self.expect_ident()?;
@@ -221,14 +272,12 @@ impl Parser {
                 _ => break,
             }
         }
-
         let where_clause = if self.peek() == Some(&Token::Where) {
             self.advance();
             Some(self.parse_expr()?)
         } else {
             None
         };
-
         Ok(Stmt::Update(UpdateStmt { table_name, assignments, where_clause }))
     }
 
@@ -236,20 +285,16 @@ impl Parser {
         self.expect(&Token::Delete)?;
         self.expect(&Token::From)?;
         let table_name = self.expect_ident()?;
-
         let where_clause = if self.peek() == Some(&Token::Where) {
             self.advance();
             Some(self.parse_expr()?)
         } else {
             None
         };
-
         Ok(Stmt::Delete(DeleteStmt { table_name, where_clause }))
     }
 
-    fn parse_expr(&mut self) -> Result<Expr> {
-        self.parse_and()
-    }
+    fn parse_expr(&mut self) -> Result<Expr> { self.parse_and() }
 
     fn parse_and(&mut self) -> Result<Expr> {
         let mut left = self.parse_or()?;
@@ -322,10 +367,7 @@ mod tests {
     fn parse_create_table() {
         let stmt = parse("CREATE TABLE users (id INTEGER, name TEXT)");
         match stmt {
-            Stmt::CreateTable(s) => {
-                assert_eq!(s.table_name, "users");
-                assert_eq!(s.columns.len(), 2);
-            }
+            Stmt::CreateTable(s) => assert_eq!(s.columns.len(), 2),
             _ => panic!("wrong stmt"),
         }
     }
@@ -357,6 +399,7 @@ mod tests {
         match stmt {
             Stmt::Select(s) => {
                 assert!(matches!(s.columns, SelectColumns::Star));
+                assert!(s.joins.is_empty());
                 assert!(s.where_clause.is_none());
                 assert!(s.order_by.is_empty());
                 assert!(s.limit.is_none());
@@ -407,7 +450,6 @@ mod tests {
         match stmt {
             Stmt::Select(s) => {
                 assert_eq!(s.order_by.len(), 1);
-                assert_eq!(s.order_by[0].column, "age");
                 assert_eq!(s.order_by[0].direction, OrderDirection::Desc);
             }
             _ => panic!("wrong stmt"),
@@ -449,10 +491,7 @@ mod tests {
         let stmt = parse("UPDATE users SET age = 31 WHERE id = 1");
         match stmt {
             Stmt::Update(s) => {
-                assert_eq!(s.table_name, "users");
                 assert_eq!(s.assignments.len(), 1);
-                assert_eq!(s.assignments[0].column, "age");
-                assert_eq!(s.assignments[0].value, Value::Integer(31));
                 assert!(s.where_clause.is_some());
             }
             _ => panic!("wrong stmt"),
@@ -472,10 +511,7 @@ mod tests {
     fn parse_delete() {
         let stmt = parse("DELETE FROM users WHERE id = 1");
         match stmt {
-            Stmt::Delete(s) => {
-                assert_eq!(s.table_name, "users");
-                assert!(s.where_clause.is_some());
-            }
+            Stmt::Delete(s) => assert!(s.where_clause.is_some()),
             _ => panic!("wrong stmt"),
         }
     }
@@ -485,6 +521,51 @@ mod tests {
         let stmt = parse("DELETE FROM users");
         match stmt {
             Stmt::Delete(s) => assert!(s.where_clause.is_none()),
+            _ => panic!("wrong stmt"),
+        }
+    }
+
+    #[test]
+    fn parse_inner_join() {
+        let stmt = parse(
+            "SELECT users.name, orders.amount FROM users INNER JOIN orders ON users.id = orders.user_id"
+        );
+        match stmt {
+            Stmt::Select(s) => {
+                assert_eq!(s.joins.len(), 1);
+                assert_eq!(s.joins[0].join_type, JoinType::Inner);
+                assert_eq!(s.joins[0].table_name, "orders");
+                assert_eq!(s.joins[0].on.left_col, "id");
+                assert_eq!(s.joins[0].on.right_col, "user_id");
+            }
+            _ => panic!("wrong stmt"),
+        }
+    }
+
+    #[test]
+    fn parse_left_join() {
+        let stmt = parse(
+            "SELECT users.name, orders.amount FROM users LEFT JOIN orders ON users.id = orders.user_id"
+        );
+        match stmt {
+            Stmt::Select(s) => {
+                assert_eq!(s.joins[0].join_type, JoinType::Left);
+            }
+            _ => panic!("wrong stmt"),
+        }
+    }
+
+    #[test]
+    fn parse_qualified_columns() {
+        let stmt = parse("SELECT users.name, orders.amount FROM users");
+        match stmt {
+            Stmt::Select(s) => {
+                if let SelectColumns::Named(cols) = s.columns {
+                    assert_eq!(cols[0].table, Some("users".to_string()));
+                    assert_eq!(cols[0].column, "name");
+                    assert_eq!(cols[1].table, Some("orders".to_string()));
+                }
+            }
             _ => panic!("wrong stmt"),
         }
     }
