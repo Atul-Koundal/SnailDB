@@ -38,6 +38,7 @@ pub struct InsertStmt {
 pub struct SelectStmt {
     pub table_name: String,
     pub columns: SelectColumns,
+    pub joins: Vec<JoinClause>,
     pub where_clause: Option<Expr>,
     pub order_by: Vec<OrderByClause>,
     pub limit: Option<usize>,
@@ -46,7 +47,52 @@ pub struct SelectStmt {
 #[derive(Debug, Clone)]
 pub enum SelectColumns {
     Star,
-    Named(Vec<String>),
+    Named(Vec<ColumnRef>),
+}
+
+/// A column reference — either `col` or `table.col`
+#[derive(Debug, Clone)]
+pub struct ColumnRef {
+    pub table: Option<String>,
+    pub column: String,
+}
+
+impl ColumnRef {
+    pub fn unqualified(column: &str) -> Self {
+        ColumnRef { table: None, column: column.to_string() }
+    }
+    pub fn qualified(table: &str, column: &str) -> Self {
+        ColumnRef { table: Some(table.to_string()), column: column.to_string() }
+    }
+    /// Display name used as the output column header
+    pub fn display_name(&self) -> String {
+        match &self.table {
+            Some(t) => format!("{}.{}", t, self.column),
+            None    => self.column.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct JoinClause {
+    pub join_type: JoinType,
+    pub table_name: String,
+    pub on: JoinCondition,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum JoinType {
+    Inner,
+    Left,
+}
+
+/// ON left_table.left_col = right_table.right_col
+#[derive(Debug, Clone)]
+pub struct JoinCondition {
+    pub left_table: String,
+    pub left_col: String,
+    pub right_table: String,
+    pub right_col: String,
 }
 
 #[derive(Debug, Clone)]
