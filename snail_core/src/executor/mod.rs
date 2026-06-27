@@ -452,13 +452,17 @@ mod tests {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn temp_engine() -> (Engine, std::path::PathBuf) {
-        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let mut path = std::env::temp_dir();
-        let tid = std::thread::current().id();
-        path.push(format!("snaildb_exec_{:?}_{}.redb", tid, n));
-        let engine = Engine::open(path.to_str().unwrap()).unwrap();
-        (engine, path)
-    }
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let mut path = std::env::temp_dir();
+    path.push(format!("snaildb_exec_{}_{}.redb", ts, n));
+    let engine = Engine::open(path.to_str().unwrap()).unwrap();
+    (engine, path)
+}
 
     fn run(engine: &Engine, sql: &str) -> QueryResult {
         let tokens = Lexer::new(sql).tokenize().unwrap();
