@@ -183,21 +183,29 @@ impl Engine {
 
         // ── ORDER BY ──────────────────────────────────────────────────
         if !stmt.order_by.is_empty() {
-            combined_rows.sort_by(|a, b| {
-                for clause in &stmt.order_by {
-                    let av = a.get(&clause.column);
-                    let bv = b.get(&clause.column);
-                    let ord = compare_json_values(av, bv);
-                    let ord = if clause.direction == OrderDirection::Desc {
-                        ord.reverse()
-                    } else {
-                        ord
-                    };
-                    if ord != std::cmp::Ordering::Equal { return ord; }
-                }
-                std::cmp::Ordering::Equal
+    combined_rows.sort_by(|a, b| {
+        for clause in &stmt.order_by {
+            let av = a.get(&clause.column).or_else(|| {
+                a.keys()
+                    .find(|k| k.ends_with(&format!(".{}", clause.column)))
+                    .and_then(|k| a.get(k))
             });
+            let bv = b.get(&clause.column).or_else(|| {
+                b.keys()
+                    .find(|k| k.ends_with(&format!(".{}", clause.column)))
+                    .and_then(|k| b.get(k))
+            });
+            let ord = compare_json_values(av, bv);
+            let ord = if clause.direction == OrderDirection::Desc {
+                ord.reverse()
+            } else {
+                ord
+            };
+            if ord != std::cmp::Ordering::Equal { return ord; }
         }
+        std::cmp::Ordering::Equal
+    });
+}
 
         // ── LIMIT ─────────────────────────────────────────────────────
         if let Some(n) = stmt.limit {
