@@ -37,7 +37,7 @@ class AskTranslator:
     def _find_table(self, q: str, known_tables: list[str]) -> Optional[str]:
         """Find the first known table name mentioned in the question."""
         for table in known_tables:
-            if table.lower() in q:
+            if table.lower() in q or table.lower().rstrip("s") in q:
                 return table
         return None
 

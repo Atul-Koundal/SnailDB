@@ -20,6 +20,7 @@ BANNER = r"""
 
 SnailDB v0.4.0 — slow and steady, smart and ready
 Type SQL to query. Type ASK <question> for natural language.
+Type \tables <name1> <name2> to register existing tables for ASK.
 Type \cache for cache stats. Type \quit to exit.
 """
 
@@ -57,16 +58,6 @@ def print_result(result: dict):
     print(f"\n  {count} row{'s' if count != 1 else ''} returned.")
 
 
-def get_known_tables(db) -> list[str]:
-    """Get list of tables from the database via SHOW TABLES workaround."""
-    try:
-        # We use the catalog scan — try a known pattern
-        # For now return empty list; user can tell ASK which table
-        return []
-    except Exception:
-        return []
-
-
 def main():
     print(BANNER)
 
@@ -100,6 +91,19 @@ def main():
             print()
             continue
 
+        # ── \tables command — register existing tables for ASK ────────
+        if user_input.lower().startswith("\\tables"):
+            parts = user_input.split()[1:]
+            if parts:
+                for p in parts:
+                    if p not in known_tables:
+                        known_tables.append(p)
+                print(f"  Known tables: {known_tables}")
+            else:
+                print(f"  Known tables: {known_tables if known_tables else '(none)'}")
+            print()
+            continue
+
         # ── ASK command ───────────────────────────────────────────────
         if user_input.upper().startswith("ASK "):
             question = user_input[4:].strip()
@@ -109,7 +113,11 @@ def main():
                 user_input = sql
             else:
                 print(f"  Could not translate: '{question}'")
-                print(f"  Tip: mention a table name in your question.")
+                if not known_tables:
+                    print(f"  No tables registered. Use: \\tables users orders ...")
+                else:
+                    print(f"  Known tables: {known_tables}")
+                    print(f"  Try mentioning a table name in your question.")
                 print()
                 continue
 
