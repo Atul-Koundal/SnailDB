@@ -39,6 +39,9 @@ SnailDB/
 │   └── rl_optimizer.py    Q-learning optimizer
 ├── snail_cli/
 │   └── main.py            interactive REPL
+├── tests/                 pytest suite (ask, cache, engine integration)
+├── benchmarks/
+│   └── bench.py           engine vs cache benchmark
 ├── docs/
 │   └── ARCHITECTURE.md
 └── README.md
@@ -73,6 +76,8 @@ Use `\tables` to register existing tables before using ASK.
 ## Semantic Cache
 
 The cache embeds each SELECT query as a vector. When a new query arrives it checks cosine similarity against all cached embeddings. Queries above a 0.92 similarity threshold return instantly without hitting the Rust engine. Writes automatically invalidate the cache.
+
+Embeddings alone are unsafe for SQL: `WHERE id = 1` and `WHERE id = 2` look almost identical to a language model but return different rows. So a semantic hit must also pass a guard (same literals, same remaining tokens, same SELECT list). Repeats of the exact same query, ignoring case, whitespace and `;`, are matched without any embedding.
 
 ## RL Optimizer
 
@@ -115,11 +120,26 @@ python snail_cli/main.py
 ## Tests
 
 ```bash
+# Rust: storage, catalog, lexer, parser, executor
 cd snail_core
 cargo test
+
+# Python: ASK translator, semantic cache, end-to-end through PyO3
+cd ..
+maturin develop -m snail_core/Cargo.toml   # build the extension into your active venv
+python -m pytest tests
 ```
 
-Tests cover storage, catalog, lexer, parser, and executor. CI runs formatting, clippy and the full test suite on every push.
+The Python tests use a fake embedder, so they do not need the sentence-transformers model. CI runs formatting, clippy, `cargo test` and `pytest` on every push.
+
+## Benchmarks
+
+```bash
+python benchmarks/bench.py                  # real embedding model
+python benchmarks/bench.py --fake-embedder  # no model download
+```
+
+Reports mean, median and p95 latency of a full-scan query on the engine versus a semantic cache hit. Numbers depend on your machine, so run it yourself.
 
 ## Stack
 
@@ -144,10 +164,10 @@ See [CHANGELOG.md](CHANGELOG.md).
 | v0.4.0 | Natural language ASK command |
 | v0.5.0 | Reinforcement learning query optimizer |
 | v0.6.0 | CI, license, contributing guide, architecture docs |
+| v0.7.0 | Python tests, cache correctness fix, benchmarks |
 
 ## Roadmap
 
-- v0.7.0 Python tests, cache correctness fix, benchmarks
 - v0.8.0 Aggregates (COUNT, SUM, AVG, MIN, MAX)
 - v0.9.0 GROUP BY and HAVING
 - v0.10.0 CREATE INDEX and index-aware lookups

@@ -45,7 +45,7 @@ Rows are held as flat maps of `"table.column" -> JSON value`, which lets joins a
 
 ## snail_ai
 
-- **Semantic cache**: embeds each `SELECT` with `all-MiniLM-L6-v2`; a cosine similarity of 0.92 or higher returns the cached result. Any write clears the cache.
+- **Semantic cache**: a `SELECT` is looked up in three steps: exact match on the normalized SQL, then embedding similarity (`all-MiniLM-L6-v2`, threshold 0.92) gated by a *signature guard*, then the engine. The guard requires the same ordered literals, the same bag of other tokens and the same SELECT list, because embeddings cannot tell `id = 1` from `id = 2`. Writes clear the cache.
 - **ASK translator**: rule-based natural language to SQL, with a word-overlap fallback over past questions.
 - **RL optimizer**: Q-learning agent over query types, with a Q-table persisted to disk.
 

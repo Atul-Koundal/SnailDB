@@ -3,6 +3,20 @@
 All notable changes to SnailDB are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.0]
+
+### Added
+- Python test suite (`tests/`): ASK translator, semantic cache and end-to-end engine tests through the PyO3 bridge.
+- CI job that builds the extension with maturin and runs pytest.
+- `benchmarks/bench.py` comparing a raw engine query with a semantic cache hit.
+- Exact-match fast path in the cache (normalized SQL: case, whitespace and `;` ignored).
+- `SemanticCache(embedder=..., threshold=..., max_entries=...)`: injectable embedder, configurable threshold, bounded size.
+
+### Fixed
+- **Cache returned wrong rows for near-identical queries.** `WHERE id = 1` and `WHERE id = 2` embed almost identically, so a semantic hit could return the other query's result. A hit now also requires the same literals, same remaining tokens and same SELECT list.
+- `SemanticCache._is_write` raised `IndexError` on empty input.
+- `sentence-transformers` is now imported lazily, so tests and tools do not need the model.
+
 ## [0.6.0]
 
 ### Added
