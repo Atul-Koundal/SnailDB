@@ -59,16 +59,22 @@ pub struct ColumnRef {
 
 impl ColumnRef {
     pub fn unqualified(column: &str) -> Self {
-        ColumnRef { table: None, column: column.to_string() }
+        ColumnRef {
+            table: None,
+            column: column.to_string(),
+        }
     }
     pub fn qualified(table: &str, column: &str) -> Self {
-        ColumnRef { table: Some(table.to_string()), column: column.to_string() }
+        ColumnRef {
+            table: Some(table.to_string()),
+            column: column.to_string(),
+        }
     }
     /// Display name used as the output column header
     pub fn display_name(&self) -> String {
         match &self.table {
             Some(t) => format!("{}.{}", t, self.column),
-            None    => self.column.clone(),
+            None => self.column.clone(),
         }
     }
 }

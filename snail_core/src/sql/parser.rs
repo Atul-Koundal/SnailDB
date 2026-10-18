@@ -31,7 +31,9 @@ impl Parser {
 
     pub fn parse(mut self) -> Result<Stmt> {
         let stmt = self.parse_stmt()?;
-        if self.peek() == Some(&Token::Semicolon) { self.advance(); }
+        if self.peek() == Some(&Token::Semicolon) {
+            self.advance();
+        }
         Ok(stmt)
     }
 
@@ -87,16 +89,21 @@ impl Parser {
         loop {
             let name = self.expect_ident()?;
             let type_ident = self.expect_ident()?;
-            let col_type = ColType::from_str(&type_ident)
-                .ok_or_else(|| ParseError::UnknownColType(type_ident))?;
+            let col_type =
+                ColType::from_str(&type_ident).ok_or(ParseError::UnknownColType(type_ident))?;
             columns.push(ColumnDef { name, col_type });
             match self.peek() {
-                Some(Token::Comma) => { self.advance(); }
+                Some(Token::Comma) => {
+                    self.advance();
+                }
                 _ => break,
             }
         }
         self.expect(&Token::RParen)?;
-        Ok(Stmt::CreateTable(CreateTableStmt { table_name, columns }))
+        Ok(Stmt::CreateTable(CreateTableStmt {
+            table_name,
+            columns,
+        }))
     }
 
     fn parse_insert(&mut self) -> Result<Stmt> {
@@ -108,7 +115,9 @@ impl Parser {
         loop {
             columns.push(self.expect_ident()?);
             match self.peek() {
-                Some(Token::Comma) => { self.advance(); }
+                Some(Token::Comma) => {
+                    self.advance();
+                }
                 _ => break,
             }
         }
@@ -121,18 +130,26 @@ impl Parser {
             loop {
                 row.push(self.parse_value()?);
                 match self.peek() {
-                    Some(Token::Comma) => { self.advance(); }
+                    Some(Token::Comma) => {
+                        self.advance();
+                    }
                     _ => break,
                 }
             }
             self.expect(&Token::RParen)?;
             rows.push(row);
             match self.peek() {
-                Some(Token::Comma) => { self.advance(); }
+                Some(Token::Comma) => {
+                    self.advance();
+                }
                 _ => break,
             }
         }
-        Ok(Stmt::Insert(InsertStmt { table_name, columns, rows }))
+        Ok(Stmt::Insert(InsertStmt {
+            table_name,
+            columns,
+            rows,
+        }))
     }
 
     fn parse_select(&mut self) -> Result<Stmt> {
@@ -148,7 +165,9 @@ impl Parser {
                 let col_ref = self.parse_column_ref()?;
                 cols.push(col_ref);
                 match self.peek() {
-                    Some(Token::Comma) => { self.advance(); }
+                    Some(Token::Comma) => {
+                        self.advance();
+                    }
                     _ => break,
                 }
             }
@@ -182,7 +201,11 @@ impl Parser {
             let join_table = self.expect_ident()?;
             self.expect(&Token::On)?;
             let on = self.parse_join_condition()?;
-            joins.push(JoinClause { join_type, table_name: join_table, on });
+            joins.push(JoinClause {
+                join_type,
+                table_name: join_table,
+                on,
+            });
         }
 
         // WHERE
@@ -201,13 +224,21 @@ impl Parser {
             loop {
                 let column = self.expect_ident()?;
                 let direction = match self.peek() {
-                    Some(Token::Asc)  => { self.advance(); OrderDirection::Asc  }
-                    Some(Token::Desc) => { self.advance(); OrderDirection::Desc }
+                    Some(Token::Asc) => {
+                        self.advance();
+                        OrderDirection::Asc
+                    }
+                    Some(Token::Desc) => {
+                        self.advance();
+                        OrderDirection::Desc
+                    }
                     _ => OrderDirection::Asc,
                 };
                 order_by.push(OrderByClause { column, direction });
                 match self.peek() {
-                    Some(Token::Comma) => { self.advance(); }
+                    Some(Token::Comma) => {
+                        self.advance();
+                    }
                     _ => break,
                 }
             }
@@ -218,10 +249,12 @@ impl Parser {
             self.advance();
             match self.advance() {
                 Some(Token::IntLiteral(n)) => Some(*n as usize),
-                Some(t) => return Err(ParseError::Expected {
-                    expected: "integer".to_string(),
-                    got: t.clone(),
-                }),
+                Some(t) => {
+                    return Err(ParseError::Expected {
+                        expected: "integer".to_string(),
+                        got: t.clone(),
+                    })
+                }
                 None => return Err(ParseError::UnexpectedEof),
             }
         } else {
@@ -229,7 +262,12 @@ impl Parser {
         };
 
         Ok(Stmt::Select(SelectStmt {
-            table_name, columns, joins, where_clause, order_by, limit,
+            table_name,
+            columns,
+            joins,
+            where_clause,
+            order_by,
+            limit,
         }))
     }
 
@@ -254,7 +292,12 @@ impl Parser {
         let right_table = self.expect_ident()?;
         self.expect(&Token::Dot)?;
         let right_col = self.expect_ident()?;
-        Ok(JoinCondition { left_table, left_col, right_table, right_col })
+        Ok(JoinCondition {
+            left_table,
+            left_col,
+            right_table,
+            right_col,
+        })
     }
 
     fn parse_update(&mut self) -> Result<Stmt> {
@@ -268,7 +311,9 @@ impl Parser {
             let value = self.parse_value()?;
             assignments.push(Assignment { column, value });
             match self.peek() {
-                Some(Token::Comma) => { self.advance(); }
+                Some(Token::Comma) => {
+                    self.advance();
+                }
                 _ => break,
             }
         }
@@ -278,7 +323,11 @@ impl Parser {
         } else {
             None
         };
-        Ok(Stmt::Update(UpdateStmt { table_name, assignments, where_clause }))
+        Ok(Stmt::Update(UpdateStmt {
+            table_name,
+            assignments,
+            where_clause,
+        }))
     }
 
     fn parse_delete(&mut self) -> Result<Stmt> {
@@ -291,10 +340,15 @@ impl Parser {
         } else {
             None
         };
-        Ok(Stmt::Delete(DeleteStmt { table_name, where_clause }))
+        Ok(Stmt::Delete(DeleteStmt {
+            table_name,
+            where_clause,
+        }))
     }
 
-    fn parse_expr(&mut self) -> Result<Expr> { self.parse_and() }
+    fn parse_expr(&mut self) -> Result<Expr> {
+        self.parse_and()
+    }
 
     fn parse_and(&mut self) -> Result<Expr> {
         let mut left = self.parse_or()?;
@@ -325,12 +379,12 @@ impl Parser {
 
     fn parse_cmp_op(&mut self) -> Result<CmpOp> {
         match self.advance() {
-            Some(Token::Eq)    => Ok(CmpOp::Eq),
+            Some(Token::Eq) => Ok(CmpOp::Eq),
             Some(Token::NotEq) => Ok(CmpOp::NotEq),
-            Some(Token::Lt)    => Ok(CmpOp::Lt),
-            Some(Token::Lte)   => Ok(CmpOp::Lte),
-            Some(Token::Gt)    => Ok(CmpOp::Gt),
-            Some(Token::Gte)   => Ok(CmpOp::Gte),
+            Some(Token::Lt) => Ok(CmpOp::Lt),
+            Some(Token::Lte) => Ok(CmpOp::Lte),
+            Some(Token::Gt) => Ok(CmpOp::Gt),
+            Some(Token::Gte) => Ok(CmpOp::Gte),
             Some(t) => Err(ParseError::Expected {
                 expected: "comparison operator".to_string(),
                 got: t.clone(),
@@ -341,9 +395,9 @@ impl Parser {
 
     fn parse_value(&mut self) -> Result<Value> {
         match self.advance() {
-            Some(Token::IntLiteral(n))  => Ok(Value::Integer(*n)),
+            Some(Token::IntLiteral(n)) => Ok(Value::Integer(*n)),
             Some(Token::TextLiteral(s)) => Ok(Value::Text(s.clone())),
-            Some(Token::Null)           => Ok(Value::Null),
+            Some(Token::Null) => Ok(Value::Null),
             Some(t) => Err(ParseError::Expected {
                 expected: "value".to_string(),
                 got: t.clone(),

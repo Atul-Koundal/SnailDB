@@ -11,10 +11,11 @@ pub enum ColType {
 }
 
 impl ColType {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_uppercase().as_str() {
             "INTEGER" | "INT" => Some(ColType::Integer),
-            "TEXT"    | "VARCHAR" => Some(ColType::Text),
+            "TEXT" | "VARCHAR" => Some(ColType::Text),
             _ => None,
         }
     }
@@ -153,10 +154,19 @@ mod tests {
     }
 
     fn make_schema(name: &str) -> Schema {
-        Schema::new(name, vec![
-            Column { name: "id".to_string(),   col_type: ColType::Integer },
-            Column { name: "name".to_string(), col_type: ColType::Text    },
-        ])
+        Schema::new(
+            name,
+            vec![
+                Column {
+                    name: "id".to_string(),
+                    col_type: ColType::Integer,
+                },
+                Column {
+                    name: "name".to_string(),
+                    col_type: ColType::Text,
+                },
+            ],
+        )
     }
 
     #[test]
@@ -228,8 +238,8 @@ mod tests {
     #[test]
     fn column_index() {
         let schema = make_schema("users");
-        assert_eq!(schema.column_index("id"),   Some(0));
+        assert_eq!(schema.column_index("id"), Some(0));
         assert_eq!(schema.column_index("name"), Some(1));
-        assert_eq!(schema.column_index("age"),  None);
+        assert_eq!(schema.column_index("age"), None);
     }
 }

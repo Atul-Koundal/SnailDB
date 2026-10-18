@@ -1,4 +1,4 @@
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, TableDefinition};
 use std::path::Path;
 use thiserror::Error;
 
@@ -28,7 +28,9 @@ impl Storage {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let db = Database::create(path)?;
         let txn = db.begin_write()?;
-        { let _ = txn.open_table(KV_TABLE)?; }
+        {
+            let _ = txn.open_table(KV_TABLE)?;
+        }
         txn.commit()?;
         Ok(Storage { db })
     }
@@ -41,8 +43,10 @@ impl Storage {
 
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
         let txn = self.db.begin_write()?;
-        { let mut table = txn.open_table(KV_TABLE)?;
-          table.insert(key, value)?; }
+        {
+            let mut table = txn.open_table(KV_TABLE)?;
+            table.insert(key, value)?;
+        }
         txn.commit()?;
         Ok(())
     }
@@ -50,8 +54,10 @@ impl Storage {
     pub fn delete(&self, key: &[u8]) -> Result<bool> {
         let txn = self.db.begin_write()?;
         let existed;
-        { let mut table = txn.open_table(KV_TABLE)?;
-          existed = table.remove(key)?.is_some(); }
+        {
+            let mut table = txn.open_table(KV_TABLE)?;
+            existed = table.remove(key)?.is_some();
+        }
         txn.commit()?;
         Ok(existed)
     }
@@ -62,7 +68,9 @@ impl Storage {
         let mut results = Vec::new();
         for entry in table.range(prefix..)? {
             let (k, v) = entry?;
-            if !k.value().starts_with(prefix) { break; }
+            if !k.value().starts_with(prefix) {
+                break;
+            }
             results.push((k.value().to_vec(), v.value().to_vec()));
         }
         Ok(results)
@@ -74,10 +82,16 @@ impl Storage {
             .into_iter()
             .map(|(k, _)| k)
             .collect();
-        if keys.is_empty() { return Ok(0); }
+        if keys.is_empty() {
+            return Ok(0);
+        }
         let txn = self.db.begin_write()?;
-        { let mut table = txn.open_table(KV_TABLE)?;
-          for k in &keys { table.remove(k.as_slice())?; } }
+        {
+            let mut table = txn.open_table(KV_TABLE)?;
+            for k in &keys {
+                table.remove(k.as_slice())?;
+            }
+        }
         txn.commit()?;
         Ok(keys.len())
     }
@@ -143,10 +157,14 @@ mod tests {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let mut path = std::env::temp_dir();
         path.push(format!("snaildb_persist_{}.redb", n));
-        { let s = Storage::open(&path).unwrap();
-          s.put(b"key1", b"value1").unwrap(); }
-        { let s = Storage::open(&path).unwrap();
-          assert_eq!(s.get(b"key1").unwrap(), Some(b"value1".to_vec())); }
+        {
+            let s = Storage::open(&path).unwrap();
+            s.put(b"key1", b"value1").unwrap();
+        }
+        {
+            let s = Storage::open(&path).unwrap();
+            assert_eq!(s.get(b"key1").unwrap(), Some(b"value1".to_vec()));
+        }
         let _ = std::fs::remove_file(path);
     }
 }

@@ -1,3 +1,6 @@
+// redb error types are large; boxing them everywhere would add noise for no gain here.
+#![allow(clippy::result_large_err)]
+
 pub mod catalog;
 pub mod executor;
 pub mod sql;

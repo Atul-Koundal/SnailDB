@@ -74,12 +74,18 @@ impl<'a> Lexer<'a> {
         }
         if ch == '<' {
             self.advance();
-            if self.peek() == Some('=') { self.advance(); return Ok(Token::Lte); }
+            if self.peek() == Some('=') {
+                self.advance();
+                return Ok(Token::Lte);
+            }
             return Ok(Token::Lt);
         }
         if ch == '>' {
             self.advance();
-            if self.peek() == Some('=') { self.advance(); return Ok(Token::Gte); }
+            if self.peek() == Some('=') {
+                self.advance();
+                return Ok(Token::Gte);
+            }
             return Ok(Token::Gt);
         }
 
@@ -104,7 +110,9 @@ impl<'a> Lexer<'a> {
 
     fn read_number(&mut self) -> Token {
         let start = self.pos;
-        if self.peek() == Some('-') { self.advance(); }
+        if self.peek() == Some('-') {
+            self.advance();
+        }
         while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
             self.advance();
         }
@@ -117,9 +125,9 @@ impl<'a> Lexer<'a> {
         let mut s = String::new();
         loop {
             match self.advance() {
-                None       => return Err(LexerError::UnterminatedString),
+                None => return Err(LexerError::UnterminatedString),
                 Some('\'') => break,
-                Some(c)    => s.push(c),
+                Some(c) => s.push(c),
             }
         }
         Ok(Token::TextLiteral(s))
@@ -133,31 +141,31 @@ impl<'a> Lexer<'a> {
         let word = &self.input[start..self.pos];
         match word.to_uppercase().as_str() {
             "CREATE" => Token::Create,
-            "TABLE"  => Token::Table,
+            "TABLE" => Token::Table,
             "INSERT" => Token::Insert,
-            "INTO"   => Token::Into,
+            "INTO" => Token::Into,
             "VALUES" => Token::Values,
             "SELECT" => Token::Select,
-            "FROM"   => Token::From,
-            "WHERE"  => Token::Where,
-            "AND"    => Token::And,
-            "OR"     => Token::Or,
-            "NOT"    => Token::Not,
-            "NULL"   => Token::Null,
+            "FROM" => Token::From,
+            "WHERE" => Token::Where,
+            "AND" => Token::And,
+            "OR" => Token::Or,
+            "NOT" => Token::Not,
+            "NULL" => Token::Null,
             "UPDATE" => Token::Update,
-            "SET"    => Token::Set,
+            "SET" => Token::Set,
             "DELETE" => Token::Delete,
-            "ORDER"  => Token::Order,
-            "BY"     => Token::By,
-            "ASC"    => Token::Asc,
-            "DESC"   => Token::Desc,
-            "LIMIT"  => Token::Limit,
-            "JOIN"   => Token::Join,
-            "INNER"  => Token::Inner,
-            "LEFT"   => Token::Left,
-            "RIGHT"  => Token::Right,
-            "ON"     => Token::On,
-            _        => Token::Ident(word.to_string()),
+            "ORDER" => Token::Order,
+            "BY" => Token::By,
+            "ASC" => Token::Asc,
+            "DESC" => Token::Desc,
+            "LIMIT" => Token::Limit,
+            "JOIN" => Token::Join,
+            "INNER" => Token::Inner,
+            "LEFT" => Token::Left,
+            "RIGHT" => Token::Right,
+            "ON" => Token::On,
+            _ => Token::Ident(word.to_string()),
         }
     }
 }
@@ -173,12 +181,15 @@ mod tests {
     #[test]
     fn keywords_and_idents() {
         let tokens = lex("SELECT name FROM users");
-        assert_eq!(tokens, vec![
-            Token::Select,
-            Token::Ident("name".to_string()),
-            Token::From,
-            Token::Ident("users".to_string()),
-        ]);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Select,
+                Token::Ident("name".to_string()),
+                Token::From,
+                Token::Ident("users".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -191,10 +202,17 @@ mod tests {
     #[test]
     fn operators() {
         let tokens = lex("!= <= >= < > =");
-        assert_eq!(tokens, vec![
-            Token::NotEq, Token::Lte, Token::Gte,
-            Token::Lt, Token::Gt, Token::Eq,
-        ]);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::NotEq,
+                Token::Lte,
+                Token::Gte,
+                Token::Lt,
+                Token::Gt,
+                Token::Eq,
+            ]
+        );
     }
 
     #[test]
@@ -221,7 +239,8 @@ mod tests {
 
     #[test]
     fn join_keywords_and_dot() {
-        let tokens = lex("SELECT users.name FROM users INNER JOIN orders ON users.id = orders.user_id");
+        let tokens =
+            lex("SELECT users.name FROM users INNER JOIN orders ON users.id = orders.user_id");
         assert!(tokens.contains(&Token::Inner));
         assert!(tokens.contains(&Token::Join));
         assert!(tokens.contains(&Token::On));
