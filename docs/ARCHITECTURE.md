@@ -30,8 +30,15 @@ Everything lives in a single redb table of raw bytes. Namespaces are separated b
 | `catalog:<table>` | JSON-serialised `Schema` |
 | `row:<table>:<20-digit id>` | JSON object of the row |
 | `meta:<table>:next_id` | next auto-increment row id, as text |
+| `idx:<table>:<column>:<enc>!<row id>` | empty; one entry per row per indexed column |
 
 Zero-padded row ids keep rows in insertion order during a prefix scan.
+
+### Indexes
+
+An index entry's key embeds an order-preserving encoding of the value: integers are `i` plus 16 hex digits of the sign-flipped value, text is `t` plus the hex of its bytes, NULL is `n`. The separator `!` sorts below every hex digit, so entries sort by value and then by row id. That makes `=` a prefix scan and `<`, `<=`, `>`, `>=` a range scan over one type tag.
+
+The planner (`choose_index`) looks only at AND-ed conditions, prefers equality, and ignores `!=`, NULL comparisons and anything under an OR. An index only narrows the candidate rows; the full WHERE is still evaluated, and candidates are sorted by row id, so results never depend on whether an index was used.
 
 ### Query pipeline
 

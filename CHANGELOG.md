@@ -3,6 +3,20 @@
 All notable changes to SnailDB are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.10.0]
+
+### Added
+- `CREATE INDEX name ON table (column)` on INTEGER or TEXT columns. Existing rows are backfilled.
+- Index-aware `SELECT`, `UPDATE` and `DELETE`: equality (`=`) and range (`<`, `<=`, `>`, `>=`) conditions on an indexed column narrow the scan. An index inside an `AND` is used; under an `OR`, with `!=`, or with `NULL` it is not.
+- Indexes are kept in sync on `INSERT`, `UPDATE` and `DELETE`, and persist across restarts.
+- `Storage::scan_range` for half-open key-range scans.
+- Benchmark for full scan vs. indexed point lookup.
+
+### Notes
+- The index only narrows candidates; the full `WHERE` is still evaluated, so results are identical with or without an index (covered by tests that run each query both ways). Index-narrowed results come back in row-id order, same as a full scan.
+- Queries with `JOIN` use a full scan.
+- Schemas written by earlier versions still load (the new `indexes` field defaults to empty).
+
 ## [0.9.0]
 
 ### Added

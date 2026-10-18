@@ -66,6 +66,13 @@ SELECT region, SUM(amount) FROM sales GROUP BY region HAVING COUNT(*) > 1 ORDER 
 
 Aggregates: `COUNT(*)`, `COUNT(col)`, `SUM`, `AVG`, `MIN`, `MAX`. NULLs are ignored except by `COUNT(*)`; an aggregate over no rows is `NULL` (`COUNT` is `0`).
 
+```sql
+CREATE INDEX idx_users_age ON users (age)
+SELECT * FROM users WHERE age >= 30     -- uses the index
+```
+
+An index on an INTEGER or TEXT column speeds up `=`, `<`, `<=`, `>`, `>=` in `WHERE` for `SELECT`, `UPDATE` and `DELETE`. Results are identical with or without it.
+
 With `GROUP BY`, every selected column must be a grouping column or an aggregate. `HAVING` filters groups, and `ORDER BY` can sort by an aggregate.
 
 ## Natural Language ASK
@@ -176,10 +183,10 @@ See [CHANGELOG.md](CHANGELOG.md).
 | v0.7.0 | Python tests, cache correctness fix, benchmarks |
 | v0.8.0 | Aggregates: COUNT, SUM, AVG, MIN, MAX |
 | v0.9.0 | GROUP BY, HAVING, ORDER BY aggregate |
+| v0.10.0 | CREATE INDEX and index-aware lookups |
 
 ## Roadmap
 
-- v0.10.0 CREATE INDEX and index-aware lookups
 - v0.11.0 Transactions (BEGIN, COMMIT, ROLLBACK)
 - v0.12.0 EXPLAIN and optional local-LLM ASK
 - v1.0.0 Polish and release
