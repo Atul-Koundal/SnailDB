@@ -46,6 +46,10 @@ The planner (`choose_index`) looks only at AND-ed conditions, prefers equality, 
 
 The engine also wraps every write statement in an implicit transaction and takes a snapshot of the buffer first. If the statement fails, the snapshot is restored, so a statement is all-or-nothing, and inside an explicit transaction a failed statement does not abort the rest of it.
 
+### Introspection
+
+`EXPLAIN` reuses the same planner (`choose_index`) as execution, so it cannot drift from what actually runs. `SHOW TABLES` and `DESCRIBE` read the catalog; the REPL uses them to discover tables and to give the LLM its schema context.
+
 ### Query pipeline
 
 ```
@@ -62,6 +66,7 @@ Rows are held as flat maps of `"table.column" -> JSON value`, which lets joins a
 
 - **Semantic cache**: a `SELECT` is looked up in three steps: exact match on the normalized SQL, then embedding similarity (`all-MiniLM-L6-v2`, threshold 0.92) gated by a *signature guard*, then the engine. The guard requires the same ordered literals, the same bag of other tokens and the same SELECT list, because embeddings cannot tell `id = 1` from `id = 2`. Writes clear the cache.
 - **ASK translator**: rule-based natural language to SQL, with a word-overlap fallback over past questions.
+- **LLM translator** (optional): when the rules fail, `ASK` sends the question and your table schemas to a local Ollama model. Only a single `SELECT` is accepted from it, and the REPL validates it with `EXPLAIN` before running it.
 - **RL optimizer**: Q-learning agent over query types, with a Q-table persisted to disk.
 
 ## snail_cli

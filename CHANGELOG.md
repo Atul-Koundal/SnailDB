@@ -3,6 +3,19 @@
 All notable changes to SnailDB are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.12.0]
+
+### Added
+- `EXPLAIN <select | update | delete>` shows the plan without running it: full vs. index scan (and which index), joins, filter, grouping, `HAVING`, sort and limit.
+- `SHOW TABLES` and `DESCRIBE <table>` (columns, types, indexes).
+- Optional local-LLM `ASK` (`snail_ai/llm_ask.py`): start the REPL with `--llm` (or `SNAILDB_LLM=1`) and, when the rule-based translator cannot answer, the question is sent to a local [Ollama](https://ollama.com) model together with your table schemas. Nothing leaves your machine, and there are no new Python dependencies.
+- The REPL discovers existing tables at startup, so `\tables` is no longer needed after a restart.
+- `AskTranslator.last_source` records whether the last answer came from `rules`, `llm` or `history`.
+
+### Safety
+- The LLM path is read-only: only a single `SELECT` is accepted; writes and multi-statement output are discarded. Generated SQL is also checked with `EXPLAIN` before it runs.
+- Order of translation: rules, then LLM, then similar past question.
+
 ## [0.11.0]
 
 ### Added

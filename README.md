@@ -35,7 +35,8 @@ SnailDB/
 │   └── Cargo.toml
 ├── snail_ai/
 │   ├── semantic_cache.py  sentence transformer cache
-│   ├── ask.py             natural language to SQL
+│   ├── ask.py             natural language to SQL (rules)
+│   ├── llm_ask.py         optional local-LLM translator (Ollama)
 │   └── rl_optimizer.py    Q-learning optimizer
 ├── snail_cli/
 │   └── main.py            interactive REPL
@@ -82,6 +83,16 @@ ROLLBACK        -- or COMMIT
 
 Transactions buffer writes until `COMMIT`, which applies them in one atomic step. Every single write statement is atomic as well, so a failing multi-row `INSERT` leaves nothing behind.
 
+```sql
+EXPLAIN SELECT * FROM users WHERE age >= 30
+-- INDEX SCAN users using idx_users_age (age >= 30)
+-- FILTER age >= 30
+SHOW TABLES
+DESCRIBE users
+```
+
+`EXPLAIN` works on `SELECT`, `UPDATE` and `DELETE` and never runs the statement.
+
 With `GROUP BY`, every selected column must be a grouping column or an aggregate. `HAVING` filters groups, and `ORDER BY` can sort by an aggregate.
 
 ## Natural Language ASK
@@ -96,7 +107,23 @@ ASK what is the average age of users
 ASK how many users per age
 ```
 
-Use `\tables` to register existing tables before using ASK.
+Tables are discovered automatically at startup. Use `\tables` to register extra ones.
+
+### Optional: local LLM fallback
+
+If the rules cannot translate a question, ASK can hand it to a local model through [Ollama](https://ollama.com). Nothing leaves your machine.
+
+```bash
+ollama pull llama3.2
+python snail_cli/main.py --llm
+```
+
+```
+snaildb> ASK who is the oldest person
+  Generated SQL: SELECT name FROM users ORDER BY age DESC LIMIT 1  (local LLM)
+```
+
+Only a single `SELECT` is ever accepted from the model, and the engine checks it with `EXPLAIN` before running it. Configure with `SNAILDB_LLM_MODEL` (default `llama3.2`) and `SNAILDB_LLM_HOST` (default `http://localhost:11434`).
 
 ## Semantic Cache
 
@@ -194,10 +221,10 @@ See [CHANGELOG.md](CHANGELOG.md).
 | v0.9.0 | GROUP BY, HAVING, ORDER BY aggregate |
 | v0.10.0 | CREATE INDEX and index-aware lookups |
 | v0.11.0 | Transactions: BEGIN, COMMIT, ROLLBACK; atomic statements |
+| v0.12.0 | EXPLAIN, SHOW TABLES, DESCRIBE, optional local-LLM ASK |
 
 ## Roadmap
 
-- v0.12.0 EXPLAIN and optional local-LLM ASK
 - v1.0.0 Polish and release
 
 ## Contributing
