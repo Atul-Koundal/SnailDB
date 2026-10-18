@@ -64,3 +64,17 @@ def test_aggregates_through_bridge(db):
     result = db.execute("SELECT COUNT(*), COUNT(age), SUM(age), AVG(age) FROM users")
     assert result["columns"] == ["COUNT(*)", "COUNT(age)", "SUM(age)", "AVG(age)"]
     assert result["rows"] == [["3", "2", "50", "25.0"]]
+
+
+def test_group_by_having_through_bridge(db):
+    db.execute("CREATE TABLE sales (region TEXT, amount INTEGER)")
+    db.execute(
+        "INSERT INTO sales (region, amount) VALUES "
+        "('north', 10), ('north', 20), ('south', 5), ('east', 100)"
+    )
+    result = db.execute(
+        "SELECT region, SUM(amount) FROM sales GROUP BY region "
+        "HAVING COUNT(*) >= 1 ORDER BY SUM(amount) DESC LIMIT 2"
+    )
+    assert result["columns"] == ["region", "SUM(amount)"]
+    assert result["rows"] == [["east", "100"], ["north", "30"]]
