@@ -167,6 +167,9 @@ impl<'a> Lexer<'a> {
             "ON" => Token::On,
             "GROUP" => Token::Group,
             "INDEX" => Token::Index,
+            "BEGIN" => Token::Begin,
+            "COMMIT" => Token::Commit,
+            "ROLLBACK" => Token::Rollback,
             "HAVING" => Token::Having,
             _ => Token::Ident(word.to_string()),
         }
@@ -262,5 +265,12 @@ mod tests {
         let tokens = lex("CREATE INDEX idx ON t (a)");
         assert_eq!(tokens[0], Token::Create);
         assert_eq!(tokens[1], Token::Index);
+    }
+
+    #[test]
+    fn transaction_keywords() {
+        assert_eq!(lex("begin"), vec![Token::Begin]);
+        assert_eq!(lex("COMMIT;"), vec![Token::Commit, Token::Semicolon]);
+        assert_eq!(lex("Rollback"), vec![Token::Rollback]);
     }
 }

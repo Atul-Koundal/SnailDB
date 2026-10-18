@@ -8,6 +8,9 @@ pub enum Stmt {
     Select(SelectStmt),
     Update(UpdateStmt),
     Delete(DeleteStmt),
+    Begin,
+    Commit,
+    Rollback,
 }
 
 // ── CREATE TABLE ──────────────────────────────────────────────────────────────

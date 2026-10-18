@@ -20,6 +20,10 @@ pub enum ExecError {
     ColumnCountMismatch { expected: usize, got: usize },
     #[error("column '{0}' must appear in GROUP BY or be used in an aggregate function")]
     InvalidAggregate(String),
+    #[error("a transaction is already active; COMMIT or ROLLBACK first")]
+    TransactionActive,
+    #[error("no active transaction")]
+    NoTransaction,
     #[error("index '{0}' already exists")]
     IndexExists(String),
     #[error("column '{col}' of table '{table}' is already indexed")]
@@ -65,13 +69,66 @@ impl Engine {
 
     pub fn execute(&self, stmt: Stmt) -> Result<QueryResult> {
         match stmt {
+            Stmt::Begin => {
+                if !self.storage.begin() {
+                    return Err(ExecError::TransactionActive);
+                }
+                Ok(QueryResult::message("Transaction started."))
+            }
+            Stmt::Commit => {
+                if !self.storage.commit()? {
+                    return Err(ExecError::NoTransaction);
+                }
+                Ok(QueryResult::message("Transaction committed."))
+            }
+            Stmt::Rollback => {
+                if !self.storage.rollback() {
+                    return Err(ExecError::NoTransaction);
+                }
+                Ok(QueryResult::message("Transaction rolled back."))
+            }
+            Stmt::Select(s) => self.exec_select(s),
+            write => self.execute_atomically(write),
+        }
+    }
+
+    /// Run a write statement so that it either fully applies or leaves no trace.
+    ///
+    /// Outside a transaction the statement gets an implicit one (one durable commit
+    /// instead of one per row). Inside an explicit transaction, a failing statement
+    /// is undone but the transaction stays open, like in most SQL databases.
+    fn execute_atomically(&self, stmt: Stmt) -> Result<QueryResult> {
+        let before = self.storage.snapshot();
+        let implicit = before.is_none();
+        if implicit {
+            self.storage.begin();
+        }
+        let result = match stmt {
             Stmt::CreateTable(s) => self.exec_create(s),
             Stmt::CreateIndex(s) => self.exec_create_index(s),
             Stmt::Insert(s) => self.exec_insert(s),
-            Stmt::Select(s) => self.exec_select(s),
             Stmt::Update(s) => self.exec_update(s),
             Stmt::Delete(s) => self.exec_delete(s),
+            Stmt::Select(_) | Stmt::Begin | Stmt::Commit | Stmt::Rollback => {
+                unreachable!("handled in execute")
+            }
+        };
+        match result {
+            Ok(r) => {
+                if implicit {
+                    self.storage.commit()?;
+                }
+                Ok(r)
+            }
+            Err(e) => {
+                self.storage.restore(before);
+                Err(e)
+            }
         }
+    }
+
+    pub fn in_transaction(&self) -> bool {
+        self.storage.in_transaction()
     }
 
     fn exec_create(&self, stmt: CreateTableStmt) -> Result<QueryResult> {
@@ -2181,5 +2238,136 @@ mod tests {
         assert!(choose_index(&schema, &where_of("SELECT * FROM t WHERE a = NULL")).is_none());
         assert!(choose_index(&schema, &where_of("SELECT * FROM t WHERE a = 1 OR b = 2")).is_none());
         assert!(choose_index(&schema, &where_of("SELECT * FROM t WHERE c = 1")).is_none());
+    }
+
+    #[test]
+    fn rollback_undoes_inserts_updates_deletes_and_index_entries() {
+        let (engine, p) = temp_engine();
+        people(&engine);
+        run(&engine, "CREATE INDEX idx_age ON users (age)");
+        run(&engine, "BEGIN");
+        run(
+            &engine,
+            "INSERT INTO users (id, name, age) VALUES (9, 'Zed', 99)",
+        );
+        run(&engine, "UPDATE users SET age = 1 WHERE id = 1");
+        run(&engine, "DELETE FROM users WHERE id = 2");
+        // reads inside the transaction see the uncommitted state, through the index too
+        assert_eq!(
+            run(&engine, "SELECT * FROM users WHERE age = 99")
+                .rows
+                .len(),
+            1
+        );
+        assert_eq!(
+            run(&engine, "SELECT COUNT(*) FROM users").rows[0][0],
+            Some("4".to_string())
+        );
+        run(&engine, "ROLLBACK");
+        let r = run(&engine, "SELECT id, age FROM users ORDER BY id ASC");
+        assert_eq!(col(&r, 1), vec!["30", "20", "25", "NULL"]);
+        assert!(run(&engine, "SELECT * FROM users WHERE age = 99")
+            .rows
+            .is_empty());
+        assert_eq!(index_entry_count(&engine, "users", "age"), 4);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn commit_makes_changes_durable() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let mut path = std::env::temp_dir();
+        path.push(format!("snaildb_commit_{}.redb", n));
+        {
+            let e = Engine::open(path.to_str().unwrap()).unwrap();
+            run(&e, "CREATE TABLE t (a INTEGER)");
+            run(&e, "BEGIN");
+            run(&e, "INSERT INTO t (a) VALUES (1), (2)");
+            run(&e, "COMMIT");
+            run(&e, "BEGIN");
+            run(&e, "INSERT INTO t (a) VALUES (3)");
+            // dropped without COMMIT
+        }
+        let e = Engine::open(path.to_str().unwrap()).unwrap();
+        assert_eq!(run(&e, "SELECT * FROM t").rows.len(), 2);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn ddl_is_transactional() {
+        let (engine, p) = temp_engine();
+        run(&engine, "BEGIN");
+        run(&engine, "CREATE TABLE t (a INTEGER)");
+        run(&engine, "INSERT INTO t (a) VALUES (1)");
+        run(&engine, "ROLLBACK");
+        assert!(matches!(
+            run_err(&engine, "SELECT * FROM t"),
+            ExecError::TableNotFound(_)
+        ));
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn transaction_state_errors() {
+        let (engine, p) = temp_engine();
+        assert!(matches!(
+            run_err(&engine, "COMMIT"),
+            ExecError::NoTransaction
+        ));
+        assert!(matches!(
+            run_err(&engine, "ROLLBACK"),
+            ExecError::NoTransaction
+        ));
+        run(&engine, "BEGIN");
+        assert!(engine.in_transaction());
+        assert!(matches!(
+            run_err(&engine, "BEGIN"),
+            ExecError::TransactionActive
+        ));
+        run(&engine, "COMMIT");
+        assert!(!engine.in_transaction());
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn failed_multi_row_insert_leaves_nothing_behind() {
+        let (engine, p) = temp_engine();
+        run(&engine, "CREATE TABLE t (id INTEGER)");
+        run(&engine, "CREATE INDEX idx_id ON t (id)");
+        // the second row cannot be coerced to INTEGER
+        let err = run_err(&engine, "INSERT INTO t (id) VALUES (1), ('oops')");
+        assert!(matches!(err, ExecError::TypeMismatch { .. }));
+        assert!(run(&engine, "SELECT * FROM t").rows.is_empty());
+        assert_eq!(index_entry_count(&engine, "t", "id"), 0);
+        assert!(!engine.in_transaction());
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn failed_statement_inside_transaction_keeps_the_transaction_open() {
+        let (engine, p) = temp_engine();
+        run(&engine, "CREATE TABLE t (id INTEGER)");
+        run(&engine, "BEGIN");
+        run(&engine, "INSERT INTO t (id) VALUES (1)");
+        let _ = run_err(&engine, "INSERT INTO t (id) VALUES (2), ('bad')");
+        assert!(engine.in_transaction());
+        run(&engine, "COMMIT");
+        // only the first, successful statement survived
+        assert_eq!(col(&run(&engine, "SELECT id FROM t"), 0), vec!["1"]);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn row_ids_roll_back_too() {
+        let (engine, p) = temp_engine();
+        run(&engine, "CREATE TABLE t (id INTEGER)");
+        run(&engine, "BEGIN");
+        run(&engine, "INSERT INTO t (id) VALUES (1), (2), (3)");
+        run(&engine, "ROLLBACK");
+        run(&engine, "INSERT INTO t (id) VALUES (7)");
+        let keys = engine.storage.scan_prefix(b"row:t:").unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(row_id_from_key(&keys[0].0), 1, "ids restart after rollback");
+        let _ = std::fs::remove_file(p);
     }
 }

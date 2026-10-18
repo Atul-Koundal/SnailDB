@@ -28,6 +28,9 @@ pub enum Token {
     On,
     Group,
     Index,
+    Begin,
+    Commit,
+    Rollback,
     Having,
 
     // ── Identifiers & literals ────────────────────────────────────────

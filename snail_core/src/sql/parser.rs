@@ -84,6 +84,18 @@ impl Parser {
             Token::Select => self.parse_select(),
             Token::Update => self.parse_update(),
             Token::Delete => self.parse_delete(),
+            Token::Begin => {
+                self.advance();
+                Ok(Stmt::Begin)
+            }
+            Token::Commit => {
+                self.advance();
+                Ok(Stmt::Commit)
+            }
+            Token::Rollback => {
+                self.advance();
+                Ok(Stmt::Rollback)
+            }
             other => Err(ParseError::UnknownStatement(other.clone())),
         }
     }
@@ -901,5 +913,12 @@ mod tests {
                 "{sql} should not parse"
             );
         }
+    }
+
+    #[test]
+    fn parse_transaction_statements() {
+        assert!(matches!(parse("BEGIN"), Stmt::Begin));
+        assert!(matches!(parse("commit;"), Stmt::Commit));
+        assert!(matches!(parse("ROLLBACK"), Stmt::Rollback));
     }
 }
