@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import snail_core
 from snail_ai.semantic_cache import SemanticCache
 from snail_ai.ask import AskTranslator
+from snail_ai.llm_ask import LLMTranslator
 
 DB_PATH = "snaildb.redb"
 
@@ -18,9 +19,10 @@ BANNER = r"""
  ____) | | | | (_| | | || |_| | |_) |
 |_____/|_| |_|\__,_|_|_||____/|____/
 
-SnailDB v0.4.0 — slow and steady, smart and ready
+SnailDB v0.12.0 — slow and steady, smart and ready
 Type SQL to query. Type ASK <question> for natural language.
-Type \tables <name1> <name2> to register existing tables for ASK.
+Tables are discovered automatically; \tables <name> registers extra ones.
+Start with --llm to let ASK fall back to a local LLM (Ollama).
 Type \cache for cache stats. Type \quit to exit.
 """
 
@@ -58,6 +60,23 @@ def print_result(result: dict):
     print(f"\n  {count} row{'s' if count != 1 else ''} returned.")
 
 
+def discover_tables(db) -> list[str]:
+    """Names of all tables already in the database."""
+    return [row[0] for row in db.execute("SHOW TABLES")["rows"]]
+
+
+def load_schemas(db, tables: list[str]) -> dict:
+    """{table: [(column, type), ...]}, used to give the LLM context."""
+    schemas = {}
+    for table in tables:
+        try:
+            rows = db.execute(f"DESCRIBE {table}")["rows"]
+        except RuntimeError:
+            continue
+        schemas[table] = [(r[0], r[1]) for r in rows]
+    return schemas
+
+
 def main():
     print(BANNER)
 
@@ -68,8 +87,20 @@ def main():
         sys.exit(1)
 
     cache = SemanticCache()
-    ask = AskTranslator()
-    known_tables: list[str] = []
+
+    llm = None
+    if "--llm" in sys.argv or os.environ.get("SNAILDB_LLM") == "1":
+        llm = LLMTranslator()
+        if llm.is_available():
+            print(f"  Local LLM ready ({llm.model}). ASK uses it when the rules do not match.")
+        else:
+            print("  Local LLM not reachable (is Ollama running?). Using rule-based ASK only.")
+            llm = None
+
+    ask = AskTranslator(llm=llm)
+    known_tables: list[str] = discover_tables(db)
+    if known_tables:
+        print(f"  Found tables: {known_tables}")
     print()
 
     while True:
@@ -107,9 +138,19 @@ def main():
         # ── ASK command ───────────────────────────────────────────────
         if user_input.upper().startswith("ASK "):
             question = user_input[4:].strip()
-            sql = ask.translate(question, known_tables)
+            schemas = load_schemas(db, known_tables) if llm else None
+            sql = ask.translate(question, known_tables, schemas)
+            if sql and ask.last_source == "llm":
+                # The model can be wrong: let the engine check the statement first.
+                try:
+                    db.execute("EXPLAIN " + sql)
+                except RuntimeError as e:
+                    print(f"  The LLM produced SQL the engine rejected ({e}): {sql}")
+                    print()
+                    continue
             if sql:
-                print(f"  Generated SQL: {sql}")
+                source = "  (local LLM)" if ask.last_source == "llm" else ""
+                print(f"  Generated SQL: {sql}{source}")
                 user_input = sql
             else:
                 print(f"  Could not translate: '{question}'")
