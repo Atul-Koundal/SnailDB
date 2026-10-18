@@ -165,6 +165,7 @@ python snail_cli/main.py
 | Any SQL | Execute SQL directly |
 | `ASK question` | Natural language query |
 | `\tables name1 name2` | Register tables for ASK |
+| `\help` | List commands |
 | `\cache` | Semantic cache statistics |
 | `\rl` | RL optimizer statistics |
 | `\quit` | Exit |
@@ -222,10 +223,21 @@ See [CHANGELOG.md](CHANGELOG.md).
 | v0.10.0 | CREATE INDEX and index-aware lookups |
 | v0.11.0 | Transactions: BEGIN, COMMIT, ROLLBACK; atomic statements |
 | v0.12.0 | EXPLAIN, SHOW TABLES, DESCRIBE, optional local-LLM ASK |
+| v1.0.0 | WHERE precedence fix, quote escaping, no-panic hardening, REPL help |
 
-## Roadmap
+## Limitations and future work
 
-- v1.0.0 Polish and release
+SnailDB is a learning project, and these limits are deliberate or known:
+
+- **Single connection.** There is no concurrent-transaction handling or isolation levels.
+- **Rows are stored as JSON** in a key-value store. Simple and easy to inspect, not compact or fast.
+- **Joins are nested-loop** and never use indexes. Only the base table of a plain `SELECT`, and `UPDATE` / `DELETE`, can use one.
+- **Two column types:** `INTEGER` (64-bit) and `TEXT`. No floats, dates or booleans, and no `PRIMARY KEY` / `UNIQUE` constraints.
+- **`WHERE` takes unqualified columns** compared with a literal. No `LIKE`, `IN`, `BETWEEN`, subqueries or column-to-column comparisons.
+- **No `DROP TABLE` or `ALTER TABLE`** yet.
+- **The semantic cache is approximate for SQL.** The signature guard prevents the failure modes found so far (different literals, operators or select lists), but embeddings of SQL are inherently fuzzy. Exact repeats are always safe.
+
+Ideas for next: `DROP TABLE`, `PRIMARY KEY` / `UNIQUE`, `LIKE`, column-to-column comparisons, hash joins, and a compact binary row format.
 
 ## Contributing
 

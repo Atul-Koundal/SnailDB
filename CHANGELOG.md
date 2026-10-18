@@ -3,6 +3,24 @@
 All notable changes to SnailDB are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.0]
+
+First stable release.
+
+### Fixed
+- **`AND` / `OR` precedence in `WHERE` was inverted.** `a = 1 OR b = 2 AND c = 3` was parsed as `(a = 1 OR b = 2) AND c = 3`. `AND` now binds tighter than `OR`, as in standard SQL.
+- **Integer literals larger than `i64` crashed the process** (a panic that surfaced as a Python `PanicException`). It is now a normal `integer literal '...' is out of range` error.
+- Corrupt row data no longer panics the executor; it returns an error.
+
+### Added
+- Parentheses in `WHERE`: `WHERE (a = 1 OR b = 2) AND c = 3`.
+- Escaped quotes in string literals: `'it''s'`.
+- `\help` in the REPL, and a `snaildb*>` prompt while a transaction is open.
+- Documentation: limitations and design notes in the README.
+
+### Changed
+- Crate and REPL version bumped to 1.0.0.
+
 ## [0.12.0]
 
 ### Added

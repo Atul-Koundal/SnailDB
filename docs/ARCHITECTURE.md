@@ -72,3 +72,10 @@ Rows are held as flat maps of `"table.column" -> JSON value`, which lets joins a
 ## snail_cli
 
 An interactive REPL that wires the layers together and pretty-prints results.
+
+## Design notes
+
+- **Errors, not panics.** Everything reachable from user input returns an error that crosses PyO3 as a `RuntimeError`. A panic would surface as an unrecoverable `PanicException`, so the lexer and executor avoid `unwrap()` on input-derived data.
+- **Standard precedence.** `WHERE` and `HAVING` both parse `AND` tighter than `OR`, with parentheses supported in `WHERE`.
+- **Plans cannot drift.** `EXPLAIN` calls the same `choose_index` the executor uses.
+- **Layering is enforced by structure.** `snail_cli` imports `snail_ai`, which imports `snail_core`; nothing imports upward.
