@@ -56,3 +56,11 @@ def test_cache_over_real_engine(db):
     third, hit3 = cache.execute(db, "SELECT * FROM t")
     assert hit3 is False
     assert len(third["rows"]) == 2
+
+
+def test_aggregates_through_bridge(db):
+    db.execute("CREATE TABLE users (id INTEGER, age INTEGER)")
+    db.execute("INSERT INTO users (id, age) VALUES (1, 30), (2, 20), (3, NULL)")
+    result = db.execute("SELECT COUNT(*), COUNT(age), SUM(age), AVG(age) FROM users")
+    assert result["columns"] == ["COUNT(*)", "COUNT(age)", "SUM(age)", "AVG(age)"]
+    assert result["rows"] == [["3", "2", "50", "25.0"]]
