@@ -25,6 +25,12 @@ def ask():
         ),
         ("delete user with id 2", "DELETE FROM users WHERE id = 2"),
         ("update users set age to 40 where id = 1", "UPDATE users SET age = 40 WHERE id = 1"),
+        ("how many users are there", "SELECT COUNT(*) FROM users"),
+        ("count users older than 25", "SELECT COUNT(*) FROM users WHERE age > 25"),
+        ("what is the average age of users", "SELECT AVG(age) FROM users"),
+        ("total amount of orders", "SELECT SUM(amount) FROM orders"),
+        ("maximum age of users", "SELECT MAX(age) FROM users"),
+        ("lowest amount in orders", "SELECT MIN(amount) FROM orders"),
     ],
 )
 def test_rule_based_translation(ask, question, expected):

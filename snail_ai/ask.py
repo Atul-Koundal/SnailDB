@@ -114,6 +114,34 @@ class AskTranslator:
             return col, direction
         return None
 
+    # Words that can follow "average"/"total"/... but are not column names.
+    _NOT_COLUMNS = {"of", "in", "for", "the", "a", "an", "all", "number", "users", "from"}
+
+    def _extract_aggregate(self, q: str, table: str) -> Optional[str]:
+        """Detect aggregate questions and return e.g. 'COUNT(*)' or 'AVG(age)'.
+
+        Handles: "how many X", "count X", "number of X", "average age of X",
+        "total amount of X", "sum of amount", "maximum age", "lowest price".
+        """
+        if re.search(r"\b(?:how many|count|number of)\b", q):
+            return "COUNT(*)"
+
+        patterns = [
+            (r"\b(?:average|avg|mean)\s+(\w+)", "AVG"),
+            (r"\b(?:total|sum(?:\s+of)?)\s+(\w+)", "SUM"),
+            (r"\b(?:maximum|max|highest|largest|biggest)\s+(\w+)", "MAX"),
+            (r"\b(?:minimum|min|lowest|smallest)\s+(\w+)", "MIN"),
+        ]
+        table_words = {table.lower(), table.lower().rstrip("s")}
+        for pattern, func in patterns:
+            match = re.search(pattern, q)
+            if match:
+                col = match.group(1)
+                if col in self._NOT_COLUMNS or col in table_words:
+                    continue
+                return f"{func}({col})"
+        return None
+
     def _rule_based(self, q: str, known_tables: list[str]) -> Optional[str]:
         """Apply rule-based translation patterns."""
         table = self._find_table(q, known_tables)
@@ -157,6 +185,15 @@ class AskTranslator:
                 if condition:
                     sql += f" WHERE {condition}"
                 return sql
+
+        # Aggregates: "how many users", "average age of users", ...
+        aggregate = self._extract_aggregate(q, table)
+        if aggregate:
+            sql = f"SELECT {aggregate} FROM {table}"
+            condition = self._extract_condition(q)
+            if condition:
+                sql += f" WHERE {condition}"
+            return sql
 
         # SELECT (default)
         if is_select or (not is_delete and not is_update):
