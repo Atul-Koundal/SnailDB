@@ -217,12 +217,33 @@ impl Engine {
             combined_rows.retain(|row| eval_expr(expr, row));
         }
 
-        // ── Aggregates ────────────────────────────────────────────────
-        if let SelectColumns::Items(items) = &stmt.columns {
-            return exec_aggregate(items, &combined_rows, &all_schemas, stmt.limit);
+        // ── Aggregates / GROUP BY / HAVING ────────────────────────────
+        let is_grouped = !stmt.group_by.is_empty()
+            || stmt.having.is_some()
+            || matches!(stmt.columns, SelectColumns::Items(_));
+        if is_grouped {
+            let items: Vec<SelectItem> = match &stmt.columns {
+                SelectColumns::Items(items) => items.clone(),
+                SelectColumns::Named(refs) => {
+                    refs.iter().cloned().map(SelectItem::Column).collect()
+                }
+                SelectColumns::Star => return Err(ExecError::InvalidAggregate("*".to_string())),
+            };
+            return exec_grouped(
+                &items,
+                &stmt.group_by,
+                stmt.having.as_ref(),
+                &stmt.order_by,
+                stmt.limit,
+                &combined_rows,
+                &all_schemas,
+            );
         }
 
         // ── ORDER BY ──────────────────────────────────────────────────
+        if let Some(bad) = stmt.order_by.iter().find(|c| c.column.contains('(')) {
+            return Err(ExecError::InvalidAggregate(bad.column.clone()));
+        }
         if !stmt.order_by.is_empty() {
             combined_rows.sort_by(|a, b| {
                 for clause in &stmt.order_by {
@@ -478,48 +499,255 @@ fn validate_column(col: &ColumnRef, schemas: &[Schema]) -> Result<()> {
     }
 }
 
-// ── Aggregates ────────────────────────────────────────────────────────────────
+// ── Aggregates and grouping ───────────────────────────────────────────────────
 
-/// Evaluate a select list of aggregates over all `rows`, producing a single result row.
-fn exec_aggregate(
+/// A computed cell value. Keeping values typed until the very end lets `HAVING` and
+/// `ORDER BY` compare numbers as numbers instead of comparing their text.
+#[derive(Debug, Clone, PartialEq)]
+enum Cell {
+    Int(i64),
+    Float(f64),
+    Text(String),
+    Null,
+}
+
+impl Cell {
+    fn from_json(v: &JsonValue) -> Cell {
+        match v {
+            JsonValue::Number(n) => match n.as_i64() {
+                Some(i) => Cell::Int(i),
+                None => Cell::Float(n.as_f64().unwrap_or(0.0)),
+            },
+            JsonValue::String(s) => Cell::Text(s.clone()),
+            JsonValue::Null => Cell::Null,
+            other => Cell::Text(other.to_string()),
+        }
+    }
+
+    fn render(&self) -> String {
+        match self {
+            Cell::Int(i) => i.to_string(),
+            Cell::Float(f) => format_float(*f),
+            Cell::Text(s) => s.clone(),
+            Cell::Null => "NULL".to_string(),
+        }
+    }
+
+    fn as_f64(&self) -> Option<f64> {
+        match self {
+            Cell::Int(i) => Some(*i as f64),
+            Cell::Float(f) => Some(*f),
+            _ => None,
+        }
+    }
+}
+
+/// Total ordering used by ORDER BY on computed rows: NULL first, numbers numerically,
+/// text lexically.
+fn compare_cells(a: &Cell, b: &Cell) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (Cell::Null, Cell::Null) => Ordering::Equal,
+        (Cell::Null, _) => Ordering::Less,
+        (_, Cell::Null) => Ordering::Greater,
+        (Cell::Text(x), Cell::Text(y)) => x.cmp(y),
+        _ => match (a.as_f64(), b.as_f64()) {
+            (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+            _ => Ordering::Equal,
+        },
+    }
+}
+
+fn cmp_matches(ord: std::cmp::Ordering, op: &CmpOp) -> bool {
+    use std::cmp::Ordering;
+    match op {
+        CmpOp::Eq => ord == Ordering::Equal,
+        CmpOp::NotEq => ord != Ordering::Equal,
+        CmpOp::Lt => ord == Ordering::Less,
+        CmpOp::Lte => ord != Ordering::Greater,
+        CmpOp::Gt => ord == Ordering::Greater,
+        CmpOp::Gte => ord != Ordering::Less,
+    }
+}
+
+/// Evaluate a HAVING condition against one group of rows.
+fn eval_having(expr: &HavingExpr, group: &[&Map<String, JsonValue>]) -> Result<bool> {
+    match expr {
+        HavingExpr::And(l, r) => Ok(eval_having(l, group)? && eval_having(r, group)?),
+        HavingExpr::Or(l, r) => Ok(eval_having(l, group)? || eval_having(r, group)?),
+        HavingExpr::Comparison { agg, op, value } => {
+            let lhs = compute_aggregate(agg, group)?;
+            let rhs = match value {
+                Value::Integer(i) => Cell::Int(*i),
+                Value::Text(t) => Cell::Text(t.clone()),
+                Value::Null => Cell::Null,
+            };
+            // Comparisons with NULL are never true, as in SQL.
+            if lhs == Cell::Null || rhs == Cell::Null {
+                return Ok(false);
+            }
+            let comparable = matches!(
+                (&lhs, &rhs),
+                (Cell::Text(_), Cell::Text(_)) | (Cell::Int(_) | Cell::Float(_), Cell::Int(_))
+            );
+            Ok(comparable && cmp_matches(compare_cells(&lhs, &rhs), op))
+        }
+    }
+}
+
+/// Is `c` allowed in the select list of a grouped query (i.e. is it a GROUP BY column)?
+fn is_grouped_column(c: &ColumnRef, group_by: &[ColumnRef]) -> bool {
+    group_by.iter().any(|g| {
+        g.column == c.column && (g.table == c.table || g.table.is_none() || c.table.is_none())
+    })
+}
+
+/// Execute a query with aggregates and/or GROUP BY / HAVING over already-filtered rows.
+///
+/// With no GROUP BY all rows form a single group (so `SELECT COUNT(*) FROM empty` yields
+/// one row). With GROUP BY there is one group per distinct key, in first-seen order, and
+/// an empty input yields no rows.
+fn exec_grouped(
     items: &[SelectItem],
+    group_by: &[ColumnRef],
+    having: Option<&HavingExpr>,
+    order_by: &[OrderByClause],
+    limit: Option<usize>,
     rows: &[Map<String, JsonValue>],
     schemas: &[Schema],
-    limit: Option<usize>,
 ) -> Result<QueryResult> {
-    let mut columns = Vec::new();
-    let mut cells = Vec::new();
+    // ── Validate ──────────────────────────────────────────────────
+    for g in group_by {
+        validate_column(g, schemas)?;
+    }
     for item in items {
         match item {
             SelectItem::Column(c) => {
-                return Err(ExecError::InvalidAggregate(c.display_name()));
+                validate_column(c, schemas)?;
+                if !is_grouped_column(c, group_by) {
+                    return Err(ExecError::InvalidAggregate(c.display_name()));
+                }
             }
-            SelectItem::Aggregate(agg) => {
-                if let AggArg::Column(c) = &agg.arg {
+            SelectItem::Aggregate(a) => {
+                if let AggArg::Column(c) = &a.arg {
                     validate_column(c, schemas)?;
                 }
-                columns.push(agg.display_name());
-                cells.push(Some(compute_aggregate(agg, rows)?));
             }
         }
     }
-    let mut out_rows = vec![cells];
-    if limit == Some(0) {
-        out_rows.clear();
+    if let Some(h) = having {
+        validate_having(h, schemas)?;
     }
+
+    // ── Group ─────────────────────────────────────────────────────
+    let mut groups: Vec<Vec<&Map<String, JsonValue>>> = Vec::new();
+    if group_by.is_empty() {
+        groups.push(rows.iter().collect());
+    } else {
+        let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for row in rows {
+            let key_vals: Vec<&JsonValue> = group_by
+                .iter()
+                .map(|g| lookup_ref(row, g).unwrap_or(&JsonValue::Null))
+                .collect();
+            let key = serde_json::to_string(&key_vals)?;
+            let slot = *index.entry(key).or_insert_with(|| {
+                groups.push(Vec::new());
+                groups.len() - 1
+            });
+            groups[slot].push(row);
+        }
+    }
+
+    // ── Compute one output row per group ──────────────────────────
+    let columns: Vec<String> = items
+        .iter()
+        .map(|i| match i {
+            SelectItem::Column(c) => c.display_name(),
+            SelectItem::Aggregate(a) => a.display_name(),
+        })
+        .collect();
+
+    let mut out: Vec<Vec<Cell>> = Vec::new();
+    for group in &groups {
+        if let Some(h) = having {
+            if !eval_having(h, group)? {
+                continue;
+            }
+        }
+        let mut cells = Vec::with_capacity(items.len());
+        for item in items {
+            cells.push(match item {
+                SelectItem::Column(c) => group
+                    .first()
+                    .and_then(|r| lookup_ref(r, c))
+                    .map(Cell::from_json)
+                    .unwrap_or(Cell::Null),
+                SelectItem::Aggregate(a) => compute_aggregate(a, group)?,
+            });
+        }
+        out.push(cells);
+    }
+
+    // ── ORDER BY (against output headers) ─────────────────────────
+    if !order_by.is_empty() {
+        let mut keys = Vec::new();
+        for clause in order_by {
+            let idx = columns
+                .iter()
+                .position(|h| h == &clause.column || h.rsplit('.').next() == Some(&clause.column))
+                .ok_or_else(|| {
+                    ExecError::ColumnNotFound(clause.column.clone(), "the select list".to_string())
+                })?;
+            keys.push((idx, clause.direction == OrderDirection::Desc));
+        }
+        out.sort_by(|a, b| {
+            for (idx, desc) in &keys {
+                let ord = compare_cells(&a[*idx], &b[*idx]);
+                let ord = if *desc { ord.reverse() } else { ord };
+                if ord != std::cmp::Ordering::Equal {
+                    return ord;
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+    }
+
+    // ── LIMIT ─────────────────────────────────────────────────────
+    if let Some(n) = limit {
+        out.truncate(n);
+    }
+
+    let rows = out
+        .into_iter()
+        .map(|r| r.iter().map(|c| Some(c.render())).collect())
+        .collect();
     Ok(QueryResult {
         columns,
-        rows: out_rows,
+        rows,
         message: None,
     })
 }
 
-/// Compute one aggregate over a set of rows. NULLs are ignored (SQL semantics),
+fn validate_having(expr: &HavingExpr, schemas: &[Schema]) -> Result<()> {
+    match expr {
+        HavingExpr::And(l, r) | HavingExpr::Or(l, r) => {
+            validate_having(l, schemas)?;
+            validate_having(r, schemas)
+        }
+        HavingExpr::Comparison { agg, .. } => match &agg.arg {
+            AggArg::Column(c) => validate_column(c, schemas),
+            AggArg::Star => Ok(()),
+        },
+    }
+}
+
+/// Compute one aggregate over a group of rows. NULLs are ignored (SQL semantics),
 /// except by `COUNT(*)`. An aggregate over no non-NULL values is `NULL`
 /// (`COUNT` is `0`).
-fn compute_aggregate(agg: &AggregateExpr, rows: &[Map<String, JsonValue>]) -> Result<String> {
+fn compute_aggregate(agg: &AggregateExpr, rows: &[&Map<String, JsonValue>]) -> Result<Cell> {
     let col = match &agg.arg {
-        AggArg::Star => return Ok(rows.len().to_string()),
+        AggArg::Star => return Ok(Cell::Int(rows.len() as i64)),
         AggArg::Column(c) => c,
     };
     let values: Vec<&JsonValue> = rows
@@ -529,7 +757,7 @@ fn compute_aggregate(agg: &AggregateExpr, rows: &[Map<String, JsonValue>]) -> Re
         .collect();
 
     match agg.func {
-        AggFunc::Count => Ok(values.len().to_string()),
+        AggFunc::Count => Ok(Cell::Int(values.len() as i64)),
         AggFunc::Sum | AggFunc::Avg => {
             let mut sum: i64 = 0;
             for v in &values {
@@ -543,11 +771,11 @@ fn compute_aggregate(agg: &AggregateExpr, rows: &[Map<String, JsonValue>]) -> Re
                     .ok_or_else(|| ExecError::Overflow(agg.display_name()))?;
             }
             if values.is_empty() {
-                Ok("NULL".to_string())
+                Ok(Cell::Null)
             } else if agg.func == AggFunc::Sum {
-                Ok(sum.to_string())
+                Ok(Cell::Int(sum))
             } else {
-                Ok(format_float(sum as f64 / values.len() as f64))
+                Ok(Cell::Float(sum as f64 / values.len() as f64))
             }
         }
         AggFunc::Min | AggFunc::Max => {
@@ -564,11 +792,7 @@ fn compute_aggregate(agg: &AggregateExpr, rows: &[Map<String, JsonValue>]) -> Re
                     b
                 }
             });
-            Ok(match best {
-                Some(JsonValue::String(s)) => s.clone(),
-                Some(other) => other.to_string(),
-                None => "NULL".to_string(),
-            })
+            Ok(best.map(Cell::from_json).unwrap_or(Cell::Null))
         }
     }
 }
@@ -1172,6 +1396,241 @@ mod tests {
             "SELECT users.name FROM users INNER JOIN ghosts ON users.id = ghosts.user_id",
         );
         assert!(matches!(err, ExecError::TableNotFound(_)));
+        let _ = std::fs::remove_file(p);
+    }
+
+    fn sales(engine: &Engine) {
+        run(
+            engine,
+            "CREATE TABLE sales (id INTEGER, region TEXT, product TEXT, amount INTEGER)",
+        );
+        run(
+            engine,
+            "INSERT INTO sales (id, region, product, amount) VALUES \
+             (1, 'north', 'pen', 10), (2, 'north', 'pen', 20), (3, 'north', 'ink', 5), \
+             (4, 'south', 'pen', 7), (5, 'south', 'ink', 3), (6, 'east', 'pen', 100)",
+        );
+    }
+
+    fn col(result: &QueryResult, idx: usize) -> Vec<String> {
+        result
+            .rows
+            .iter()
+            .map(|r| r[idx].clone().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn group_by_count_per_group_in_first_seen_order() {
+        let (engine, p) = temp_engine();
+        sales(&engine);
+        let result = run(
+            &engine,
+            "SELECT region, COUNT(*) FROM sales GROUP BY region",
+        );
+        assert_eq!(result.columns, vec!["region", "COUNT(*)"]);
+        assert_eq!(col(&result, 0), vec!["north", "south", "east"]);
+        assert_eq!(col(&result, 1), vec!["3", "2", "1"]);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn group_by_sum_and_avg() {
+        let (engine, p) = temp_engine();
+        sales(&engine);
+        let result = run(
+            &engine,
+            "SELECT region, SUM(amount), AVG(amount) FROM sales GROUP BY region ORDER BY region ASC",
+        );
+        assert_eq!(col(&result, 0), vec!["east", "north", "south"]);
+        assert_eq!(col(&result, 1), vec!["100", "35", "10"]);
+        assert_eq!(col(&result, 2), vec!["100.0", "11.666666666666666", "5.0"]);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn group_by_multiple_columns() {
+        let (engine, p) = temp_engine();
+        sales(&engine);
+        let result = run(
+            &engine,
+            "SELECT region, product, COUNT(*) FROM sales GROUP BY region, product",
+        );
+        assert_eq!(result.rows.len(), 5);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn group_by_respects_where() {
+        let (engine, p) = temp_engine();
+        sales(&engine);
+        let result = run(
+            &engine,
+            "SELECT region, COUNT(*) FROM sales WHERE amount > 5 GROUP BY region ORDER BY region ASC",
+        );
+        assert_eq!(col(&result, 0), vec!["east", "north", "south"]);
+        assert_eq!(col(&result, 1), vec!["1", "2", "1"]);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn having_filters_groups() {
+        let (engine, p) = temp_engine();
+        sales(&engine);
+        let result = run(
+            &engine,
+            "SELECT region, COUNT(*) FROM sales GROUP BY region HAVING COUNT(*) > 1 ORDER BY region ASC",
+        );
+        assert_eq!(col(&result, 0), vec!["north", "south"]);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn having_compares_numbers_numerically() {
+        // "35" < "5" as text, so a string comparison would get this wrong.
+        let (engine, p) = temp_engine();
+        sales(&engine);
+        let result = run(
+            &engine,
+            "SELECT region FROM sales GROUP BY region HAVING SUM(amount) > 9 ORDER BY region ASC",
+        );
+        assert_eq!(col(&result, 0), vec!["east", "north", "south"]);
+        let result = run(
+            &engine,
+            "SELECT region FROM sales GROUP BY region HAVING SUM(amount) >= 35",
+        );
+        assert_eq!(col(&result, 0), vec!["north", "east"]);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn having_with_and_or() {
+        let (engine, p) = temp_engine();
+        sales(&engine);
+        let result = run(
+            &engine,
+            "SELECT region FROM sales GROUP BY region \
+             HAVING COUNT(*) = 1 OR SUM(amount) > 30 AND COUNT(*) > 2 ORDER BY region ASC",
+        );
+        // east: COUNT=1; north: SUM 35 > 30 AND COUNT 3 > 2; south: neither
+        assert_eq!(col(&result, 0), vec!["east", "north"]);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn order_by_aggregate_desc_with_limit() {
+        let (engine, p) = temp_engine();
+        sales(&engine);
+        let result = run(
+            &engine,
+            "SELECT region, SUM(amount) FROM sales GROUP BY region ORDER BY SUM(amount) DESC LIMIT 2",
+        );
+        assert_eq!(col(&result, 0), vec!["east", "north"]);
+        assert_eq!(col(&result, 1), vec!["100", "35"]);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn nulls_form_their_own_group() {
+        let (engine, p) = temp_engine();
+        people(&engine);
+        run(
+            &engine,
+            "INSERT INTO users (id, name, age) VALUES (5, 'Eve', NULL)",
+        );
+        let result = run(
+            &engine,
+            "SELECT age, COUNT(*) FROM users GROUP BY age ORDER BY age ASC",
+        );
+        // NULL sorts first and holds Dave and Eve
+        assert_eq!(col(&result, 0)[0], "NULL");
+        assert_eq!(col(&result, 1)[0], "2");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn group_by_on_empty_table_returns_no_rows() {
+        let (engine, p) = temp_engine();
+        run(&engine, "CREATE TABLE t (a INTEGER)");
+        let result = run(&engine, "SELECT a, COUNT(*) FROM t GROUP BY a");
+        assert!(result.rows.is_empty());
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn group_by_over_join() {
+        let (engine, p) = temp_engine();
+        run(&engine, "CREATE TABLE users (id INTEGER, name TEXT)");
+        run(
+            &engine,
+            "CREATE TABLE orders (id INTEGER, user_id INTEGER, amount INTEGER)",
+        );
+        run(
+            &engine,
+            "INSERT INTO users (id, name) VALUES (1, 'Alice'), (2, 'Bob')",
+        );
+        run(
+            &engine,
+            "INSERT INTO orders (id, user_id, amount) VALUES (1, 1, 100), (2, 1, 200), (3, 2, 50)",
+        );
+        let result = run(
+            &engine,
+            "SELECT users.name, SUM(orders.amount) FROM users INNER JOIN orders \
+             ON users.id = orders.user_id GROUP BY users.name ORDER BY users.name ASC",
+        );
+        assert_eq!(result.columns, vec!["users.name", "SUM(orders.amount)"]);
+        assert_eq!(col(&result, 0), vec!["Alice", "Bob"]);
+        assert_eq!(col(&result, 1), vec!["300", "50"]);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn having_without_group_by_applies_to_whole_table() {
+        let (engine, p) = temp_engine();
+        sales(&engine);
+        let result = run(&engine, "SELECT COUNT(*) FROM sales HAVING COUNT(*) > 100");
+        assert!(result.rows.is_empty());
+        let result = run(&engine, "SELECT COUNT(*) FROM sales HAVING COUNT(*) > 1");
+        assert_eq!(col(&result, 0), vec!["6"]);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn selecting_a_non_grouped_column_is_an_error() {
+        let (engine, p) = temp_engine();
+        sales(&engine);
+        let err = run_err(
+            &engine,
+            "SELECT product, COUNT(*) FROM sales GROUP BY region",
+        );
+        assert!(matches!(err, ExecError::InvalidAggregate(_)));
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn select_star_with_group_by_is_an_error() {
+        let (engine, p) = temp_engine();
+        sales(&engine);
+        let err = run_err(&engine, "SELECT * FROM sales GROUP BY region");
+        assert!(matches!(err, ExecError::InvalidAggregate(_)));
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn group_by_unknown_column_is_an_error() {
+        let (engine, p) = temp_engine();
+        sales(&engine);
+        let err = run_err(&engine, "SELECT COUNT(*) FROM sales GROUP BY nope");
+        assert!(matches!(err, ExecError::ColumnNotFound(_, _)));
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn order_by_aggregate_without_grouping_is_an_error() {
+        let (engine, p) = temp_engine();
+        sales(&engine);
+        let err = run_err(&engine, "SELECT * FROM sales ORDER BY COUNT(*) DESC");
+        assert!(matches!(err, ExecError::InvalidAggregate(_)));
         let _ = std::fs::remove_file(p);
     }
 }
