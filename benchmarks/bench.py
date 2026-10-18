@@ -61,6 +61,8 @@ def main():
             )
             db.execute(f"INSERT INTO users (id, name, age) VALUES {values}")
 
+        print(f"\nSnailDB benchmark: {args.rows} rows, {args.repeat} repetitions\n")
+
         # Point lookup: full scan vs. index
         lookup = f"SELECT * FROM users WHERE id = {args.rows // 2}"
         scan = summarize("point lookup, full scan", timed_ms(lambda: db.execute(lookup), args.repeat))
@@ -69,7 +71,6 @@ def main():
         print(f"\n  index speedup: {scan / idx:,.1f}x\n")
 
         query = "SELECT * FROM users WHERE age > 60"
-        print(f"\nSnailDB benchmark: {args.rows} rows, {args.repeat} repetitions\n")
 
         engine = summarize("engine (full scan + WHERE)", timed_ms(lambda: db.execute(query), args.repeat))
 

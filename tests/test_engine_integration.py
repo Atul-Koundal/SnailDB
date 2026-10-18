@@ -89,3 +89,44 @@ def test_index_through_bridge(db):
     assert db.execute("SELECT name FROM t WHERE id >= 3")["rows"] == [["c"], ["d"]]
     with pytest.raises(RuntimeError):
         db.execute("CREATE INDEX idx_id ON t (name)")
+
+
+def test_transactions_through_bridge(db):
+    db.execute("CREATE TABLE t (id INTEGER)")
+    db.execute("BEGIN")
+    db.execute("INSERT INTO t (id) VALUES (1), (2)")
+    assert len(db.execute("SELECT * FROM t")["rows"]) == 2
+    db.execute("ROLLBACK")
+    assert db.execute("SELECT * FROM t")["rows"] == []
+
+    db.execute("BEGIN")
+    db.execute("INSERT INTO t (id) VALUES (3)")
+    db.execute("COMMIT")
+    assert db.execute("SELECT * FROM t")["rows"] == [["3"]]
+
+    with pytest.raises(RuntimeError):
+        db.execute("COMMIT")  # no active transaction
+
+
+def test_cache_never_serves_rolled_back_rows(db):
+    import numpy as np
+
+    from snail_ai.semantic_cache import SemanticCache
+
+    cache = SemanticCache(embedder=lambda _t: np.array([1.0, 0.0]))
+    cache.execute(db, "CREATE TABLE t (id INTEGER)")
+    cache.execute(db, "BEGIN")
+    cache.execute(db, "INSERT INTO t (id) VALUES (1)")
+    inside, _ = cache.execute(db, "SELECT * FROM t")
+    assert len(inside["rows"]) == 1
+    cache.execute(db, "ROLLBACK")
+    after, hit = cache.execute(db, "SELECT * FROM t")
+    assert hit is False
+    assert after["rows"] == []
+
+
+def test_failed_multi_row_insert_is_atomic(db):
+    db.execute("CREATE TABLE t (id INTEGER)")
+    with pytest.raises(RuntimeError):
+        db.execute("INSERT INTO t (id) VALUES (1), ('oops')")
+    assert db.execute("SELECT * FROM t")["rows"] == []
