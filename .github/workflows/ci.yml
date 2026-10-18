@@ -29,3 +29,24 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Tests
         run: cargo test
+
+  python:
+    name: Python (build extension, pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: snail_core
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install Python dependencies
+        run: pip install maturin pytest numpy
+      - name: Build and install the Rust extension
+        run: |
+          maturin build -m snail_core/Cargo.toml --release --out dist
+          pip install dist/*.whl
+      - name: Run tests
+        run: python -m pytest tests -v
