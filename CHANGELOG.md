@@ -3,6 +3,20 @@
 All notable changes to SnailDB are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.0]
+
+### Added
+- `GROUP BY` (one or more columns, including qualified names and joins).
+- `HAVING` with `AND` / `OR` over aggregate comparisons, e.g. `HAVING COUNT(*) > 1`. Standard precedence: `AND` binds tighter than `OR`.
+- `ORDER BY` an aggregate on grouped queries: `ORDER BY SUM(amount) DESC`.
+- `GROUP` and `HAVING` keywords.
+- `ASK` handles "per" / "for each" questions ("how many users per age").
+
+### Changed
+- Aggregate results are typed internally, so `HAVING` and `ORDER BY` compare numbers numerically (`35 > 9`, not `"35" < "9"`).
+- Groups appear in first-seen order; `NULL` values form their own group; `GROUP BY` over an empty table returns no rows, while a plain aggregate over an empty table still returns one row.
+- Selecting a column that is not in `GROUP BY`, or using `SELECT *` with `GROUP BY`, is an error.
+
 ## [0.8.0]
 
 ### Added
