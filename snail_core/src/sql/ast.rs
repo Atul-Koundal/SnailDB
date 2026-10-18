@@ -11,6 +11,10 @@ pub enum Stmt {
     Begin,
     Commit,
     Rollback,
+    /// `EXPLAIN <select | update | delete>`
+    Explain(Box<Stmt>),
+    ShowTables,
+    Describe(String),
 }
 
 // ── CREATE TABLE ──────────────────────────────────────────────────────────────

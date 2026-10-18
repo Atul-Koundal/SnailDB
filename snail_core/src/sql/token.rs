@@ -31,6 +31,9 @@ pub enum Token {
     Begin,
     Commit,
     Rollback,
+    Explain,
+    Show,
+    Describe,
     Having,
 
     // ── Identifiers & literals ────────────────────────────────────────

@@ -15,6 +15,8 @@ pub enum ParseError {
     UnknownStatement(Token),
     #[error("invalid ON condition: expected table.column = table.column")]
     InvalidOnCondition,
+    #[error("EXPLAIN supports SELECT, UPDATE and DELETE statements")]
+    ExplainUnsupported,
     #[error("HAVING conditions must compare an aggregate, e.g. HAVING COUNT(*) > 1")]
     HavingNeedsAggregate,
     #[error("{0}(*) is not valid: only COUNT accepts *")]
@@ -84,6 +86,32 @@ impl Parser {
             Token::Select => self.parse_select(),
             Token::Update => self.parse_update(),
             Token::Delete => self.parse_delete(),
+            Token::Explain => {
+                self.advance();
+                let inner = self.parse_stmt()?;
+                match inner {
+                    Stmt::Select(_) | Stmt::Update(_) | Stmt::Delete(_) => {
+                        Ok(Stmt::Explain(Box::new(inner)))
+                    }
+                    _ => Err(ParseError::ExplainUnsupported),
+                }
+            }
+            Token::Show => {
+                self.advance();
+                let what = self.expect_ident()?;
+                if what.eq_ignore_ascii_case("tables") {
+                    Ok(Stmt::ShowTables)
+                } else {
+                    Err(ParseError::Expected {
+                        expected: "TABLES".to_string(),
+                        got: Token::Ident(what),
+                    })
+                }
+            }
+            Token::Describe => {
+                self.advance();
+                Ok(Stmt::Describe(self.expect_ident()?))
+            }
             Token::Begin => {
                 self.advance();
                 Ok(Stmt::Begin)
@@ -920,5 +948,32 @@ mod tests {
         assert!(matches!(parse("BEGIN"), Stmt::Begin));
         assert!(matches!(parse("commit;"), Stmt::Commit));
         assert!(matches!(parse("ROLLBACK"), Stmt::Rollback));
+    }
+
+    #[test]
+    fn parse_explain_show_describe() {
+        match parse("EXPLAIN SELECT * FROM t WHERE a = 1") {
+            Stmt::Explain(inner) => assert!(matches!(*inner, Stmt::Select(_))),
+            _ => panic!("wrong stmt"),
+        }
+        assert!(matches!(parse("EXPLAIN DELETE FROM t"), Stmt::Explain(_)));
+        assert!(matches!(parse("show tables"), Stmt::ShowTables));
+        match parse("DESCRIBE users;") {
+            Stmt::Describe(t) => assert_eq!(t, "users"),
+            _ => panic!("wrong stmt"),
+        }
+    }
+
+    #[test]
+    fn explain_rejects_unsupported_statements() {
+        let tokens = Lexer::new("EXPLAIN INSERT INTO t (a) VALUES (1)")
+            .tokenize()
+            .unwrap();
+        assert!(matches!(
+            Parser::new(tokens).parse(),
+            Err(ParseError::ExplainUnsupported)
+        ));
+        let tokens = Lexer::new("SHOW columns").tokenize().unwrap();
+        assert!(Parser::new(tokens).parse().is_err());
     }
 }

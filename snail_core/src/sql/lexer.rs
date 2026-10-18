@@ -170,6 +170,9 @@ impl<'a> Lexer<'a> {
             "BEGIN" => Token::Begin,
             "COMMIT" => Token::Commit,
             "ROLLBACK" => Token::Rollback,
+            "EXPLAIN" => Token::Explain,
+            "SHOW" => Token::Show,
+            "DESCRIBE" => Token::Describe,
             "HAVING" => Token::Having,
             _ => Token::Ident(word.to_string()),
         }
@@ -272,5 +275,12 @@ mod tests {
         assert_eq!(lex("begin"), vec![Token::Begin]);
         assert_eq!(lex("COMMIT;"), vec![Token::Commit, Token::Semicolon]);
         assert_eq!(lex("Rollback"), vec![Token::Rollback]);
+    }
+
+    #[test]
+    fn introspection_keywords() {
+        assert_eq!(lex("explain")[0], Token::Explain);
+        assert_eq!(lex("SHOW tables")[0], Token::Show);
+        assert_eq!(lex("describe users")[0], Token::Describe);
     }
 }

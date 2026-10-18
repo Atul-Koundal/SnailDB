@@ -88,6 +88,9 @@ impl Engine {
                 Ok(QueryResult::message("Transaction rolled back."))
             }
             Stmt::Select(s) => self.exec_select(s),
+            Stmt::Explain(inner) => self.exec_explain(*inner),
+            Stmt::ShowTables => self.exec_show_tables(),
+            Stmt::Describe(table) => self.exec_describe(&table),
             write => self.execute_atomically(write),
         }
     }
@@ -109,9 +112,13 @@ impl Engine {
             Stmt::Insert(s) => self.exec_insert(s),
             Stmt::Update(s) => self.exec_update(s),
             Stmt::Delete(s) => self.exec_delete(s),
-            Stmt::Select(_) | Stmt::Begin | Stmt::Commit | Stmt::Rollback => {
-                unreachable!("handled in execute")
-            }
+            Stmt::Select(_)
+            | Stmt::Begin
+            | Stmt::Commit
+            | Stmt::Rollback
+            | Stmt::Explain(_)
+            | Stmt::ShowTables
+            | Stmt::Describe(_) => unreachable!("handled in execute"),
         };
         match result {
             Ok(r) => {
@@ -484,6 +491,141 @@ impl Engine {
         )))
     }
 
+    fn exec_show_tables(&self) -> Result<QueryResult> {
+        let mut tables = Catalog::new(&self.storage).list_tables()?;
+        tables.sort();
+        Ok(QueryResult {
+            columns: vec!["table".to_string()],
+            rows: tables.into_iter().map(|t| vec![Some(t)]).collect(),
+            message: None,
+        })
+    }
+
+    fn exec_describe(&self, table: &str) -> Result<QueryResult> {
+        let schema = Catalog::new(&self.storage)
+            .get_schema(table)
+            .map_err(|_| ExecError::TableNotFound(table.to_string()))?;
+        let rows = schema
+            .columns
+            .iter()
+            .map(|c| {
+                let index = schema
+                    .indexes
+                    .iter()
+                    .find(|i| i.column == c.name)
+                    .map(|i| i.name.clone())
+                    .unwrap_or_default();
+                vec![
+                    Some(c.name.clone()),
+                    Some(c.col_type.name().to_string()),
+                    Some(index),
+                ]
+            })
+            .collect();
+        Ok(QueryResult {
+            columns: vec!["column".into(), "type".into(), "index".into()],
+            rows,
+            message: None,
+        })
+    }
+
+    /// Describe how a statement would run, without running it.
+    fn exec_explain(&self, stmt: Stmt) -> Result<QueryResult> {
+        let catalog = Catalog::new(&self.storage);
+        let get = |t: &str| {
+            catalog
+                .get_schema(t)
+                .map_err(|_| ExecError::TableNotFound(t.to_string()))
+        };
+        let mut plan: Vec<String> = Vec::new();
+
+        match &stmt {
+            Stmt::Select(s) => {
+                let schema = get(&s.table_name)?;
+                if s.joins.is_empty() {
+                    plan.push(scan_line(&s.table_name, &schema, s.where_clause.as_ref()));
+                } else {
+                    plan.push(format!(
+                        "FULL SCAN {} (joins disable index use)",
+                        s.table_name
+                    ));
+                }
+                for j in &s.joins {
+                    get(&j.table_name)?;
+                    let kind = if j.join_type == JoinType::Left {
+                        "LEFT"
+                    } else {
+                        "INNER"
+                    };
+                    plan.push(format!(
+                        "{} JOIN {} ON {}.{} = {}.{} (nested loop)",
+                        kind,
+                        j.table_name,
+                        j.on.left_table,
+                        j.on.left_col,
+                        j.on.right_table,
+                        j.on.right_col
+                    ));
+                }
+                if let Some(w) = &s.where_clause {
+                    plan.push(format!("FILTER {}", fmt_expr(w, true)));
+                }
+                let has_agg = matches!(s.columns, SelectColumns::Items(_));
+                if !s.group_by.is_empty() {
+                    let cols: Vec<String> = s.group_by.iter().map(|c| c.display_name()).collect();
+                    plan.push(format!("GROUP BY {}", cols.join(", ")));
+                } else if has_agg {
+                    plan.push("AGGREGATE (single group)".to_string());
+                }
+                if let Some(h) = &s.having {
+                    plan.push(format!("HAVING {}", fmt_having(h, true)));
+                }
+                if !s.order_by.is_empty() {
+                    let parts: Vec<String> = s
+                        .order_by
+                        .iter()
+                        .map(|o| {
+                            let dir = if o.direction == OrderDirection::Desc {
+                                "DESC"
+                            } else {
+                                "ASC"
+                            };
+                            format!("{} {}", o.column, dir)
+                        })
+                        .collect();
+                    plan.push(format!("SORT BY {}", parts.join(", ")));
+                }
+                if let Some(n) = s.limit {
+                    plan.push(format!("LIMIT {}", n));
+                }
+            }
+            Stmt::Update(u) => {
+                let schema = get(&u.table_name)?;
+                plan.push(scan_line(&u.table_name, &schema, u.where_clause.as_ref()));
+                if let Some(w) = &u.where_clause {
+                    plan.push(format!("FILTER {}", fmt_expr(w, true)));
+                }
+                let cols: Vec<&str> = u.assignments.iter().map(|a| a.column.as_str()).collect();
+                plan.push(format!("UPDATE columns: {}", cols.join(", ")));
+            }
+            Stmt::Delete(d) => {
+                let schema = get(&d.table_name)?;
+                plan.push(scan_line(&d.table_name, &schema, d.where_clause.as_ref()));
+                if let Some(w) = &d.where_clause {
+                    plan.push(format!("FILTER {}", fmt_expr(w, true)));
+                }
+                plan.push("DELETE matching rows".to_string());
+            }
+            _ => unreachable!("the parser only builds EXPLAIN for SELECT/UPDATE/DELETE"),
+        }
+
+        Ok(QueryResult {
+            columns: vec!["plan".to_string()],
+            rows: plan.into_iter().map(|l| vec![Some(l)]).collect(),
+            message: None,
+        })
+    }
+
     fn exec_create_index(&self, stmt: CreateIndexStmt) -> Result<QueryResult> {
         let catalog = Catalog::new(&self.storage);
         let mut schema = catalog
@@ -698,6 +840,82 @@ fn coerce_value(val: &Value, col_type: &ColType, col_name: &str) -> Result<JsonV
                 expected: "INTEGER".to_string(),
                 got: format!("'{}'", s),
             }),
+    }
+}
+
+// ── EXPLAIN formatting ────────────────────────────────────────────────────────
+
+fn fmt_op(op: &CmpOp) -> &'static str {
+    match op {
+        CmpOp::Eq => "=",
+        CmpOp::NotEq => "!=",
+        CmpOp::Lt => "<",
+        CmpOp::Lte => "<=",
+        CmpOp::Gt => ">",
+        CmpOp::Gte => ">=",
+    }
+}
+
+fn fmt_value(v: &Value) -> String {
+    match v {
+        Value::Integer(n) => n.to_string(),
+        Value::Text(s) => format!("'{}'", s),
+        Value::Null => "NULL".to_string(),
+    }
+}
+
+fn fmt_expr(expr: &Expr, top: bool) -> String {
+    match expr {
+        Expr::Comparison { column, op, value } => {
+            format!("{} {} {}", column, fmt_op(op), fmt_value(value))
+        }
+        Expr::And(l, r) => wrap(
+            format!("{} AND {}", fmt_expr(l, false), fmt_expr(r, false)),
+            top,
+        ),
+        Expr::Or(l, r) => wrap(
+            format!("{} OR {}", fmt_expr(l, false), fmt_expr(r, false)),
+            top,
+        ),
+    }
+}
+
+fn fmt_having(expr: &HavingExpr, top: bool) -> String {
+    match expr {
+        HavingExpr::Comparison { agg, op, value } => {
+            format!("{} {} {}", agg.display_name(), fmt_op(op), fmt_value(value))
+        }
+        HavingExpr::And(l, r) => wrap(
+            format!("{} AND {}", fmt_having(l, false), fmt_having(r, false)),
+            top,
+        ),
+        HavingExpr::Or(l, r) => wrap(
+            format!("{} OR {}", fmt_having(l, false), fmt_having(r, false)),
+            top,
+        ),
+    }
+}
+
+fn wrap(s: String, top: bool) -> String {
+    if top {
+        s
+    } else {
+        format!("({})", s)
+    }
+}
+
+/// First line of a plan: which access path the table scan uses.
+fn scan_line(table: &str, schema: &Schema, where_clause: Option<&Expr>) -> String {
+    match where_clause.and_then(|w| choose_index(schema, w)) {
+        Some(l) => format!(
+            "INDEX SCAN {} using {} ({} {} {})",
+            table,
+            l.index.name,
+            l.index.column,
+            fmt_op(&l.op),
+            fmt_value(&l.value)
+        ),
+        None => format!("FULL SCAN {}", table),
     }
 }
 
@@ -2368,6 +2586,146 @@ mod tests {
         let keys = engine.storage.scan_prefix(b"row:t:").unwrap();
         assert_eq!(keys.len(), 1);
         assert_eq!(row_id_from_key(&keys[0].0), 1, "ids restart after rollback");
+        let _ = std::fs::remove_file(p);
+    }
+
+    fn plan(engine: &Engine, sql: &str) -> Vec<String> {
+        let r = run(engine, &format!("EXPLAIN {}", sql));
+        assert_eq!(r.columns, vec!["plan"]);
+        col(&r, 0)
+    }
+
+    #[test]
+    fn explain_shows_full_scan_then_index_scan() {
+        let (engine, p) = temp_engine();
+        people(&engine);
+        assert_eq!(
+            plan(&engine, "SELECT * FROM users WHERE age > 25")[0],
+            "FULL SCAN users"
+        );
+        run(&engine, "CREATE INDEX idx_age ON users (age)");
+        let lines = plan(&engine, "SELECT * FROM users WHERE age > 25");
+        assert_eq!(lines[0], "INDEX SCAN users using idx_age (age > 25)");
+        assert_eq!(lines[1], "FILTER age > 25");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn explain_does_not_run_the_statement() {
+        let (engine, p) = temp_engine();
+        people(&engine);
+        plan(&engine, "DELETE FROM users");
+        plan(&engine, "UPDATE users SET age = 1");
+        assert_eq!(run(&engine, "SELECT * FROM users").rows.len(), 4);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn explain_index_choice_rules() {
+        let (engine, p) = temp_engine();
+        people(&engine);
+        run(&engine, "CREATE INDEX idx_age ON users (age)");
+        // OR, != and non-indexed columns fall back to a full scan
+        assert_eq!(
+            plan(&engine, "SELECT * FROM users WHERE age = 1 OR age = 2")[0],
+            "FULL SCAN users"
+        );
+        assert_eq!(
+            plan(&engine, "SELECT * FROM users WHERE age != 1")[0],
+            "FULL SCAN users"
+        );
+        assert_eq!(
+            plan(&engine, "SELECT * FROM users WHERE name = 'Bob'")[0],
+            "FULL SCAN users"
+        );
+        // an indexed condition inside an AND is found
+        assert_eq!(
+            plan(
+                &engine,
+                "SELECT * FROM users WHERE name = 'Bob' AND age = 20"
+            )[0],
+            "INDEX SCAN users using idx_age (age = 20)"
+        );
+        // UPDATE and DELETE use indexes too
+        let lines = plan(&engine, "DELETE FROM users WHERE age = 20");
+        assert_eq!(lines[0], "INDEX SCAN users using idx_age (age = 20)");
+        assert_eq!(lines[2], "DELETE matching rows");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn explain_describes_every_select_stage() {
+        let (engine, p) = temp_engine();
+        sales(&engine);
+        let lines = plan(
+            &engine,
+            "SELECT region, SUM(amount) FROM sales WHERE amount > 1 GROUP BY region \
+             HAVING COUNT(*) > 1 OR SUM(amount) < 5 ORDER BY SUM(amount) DESC LIMIT 3",
+        );
+        assert_eq!(
+            lines,
+            vec![
+                "FULL SCAN sales",
+                "FILTER amount > 1",
+                "GROUP BY region",
+                "HAVING COUNT(*) > 1 OR SUM(amount) < 5",
+                "SORT BY SUM(amount) DESC",
+                "LIMIT 3",
+            ]
+        );
+        let lines = plan(&engine, "SELECT COUNT(*) FROM sales");
+        assert_eq!(lines[1], "AGGREGATE (single group)");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn explain_join_and_errors() {
+        let (engine, p) = temp_engine();
+        run(&engine, "CREATE TABLE users (id INTEGER, name TEXT)");
+        run(&engine, "CREATE TABLE orders (id INTEGER, user_id INTEGER)");
+        let lines = plan(
+            &engine,
+            "SELECT users.name FROM users LEFT JOIN orders ON users.id = orders.user_id",
+        );
+        assert_eq!(
+            lines[1],
+            "LEFT JOIN orders ON users.id = orders.user_id (nested loop)"
+        );
+        assert!(matches!(
+            run_err(&engine, "EXPLAIN SELECT * FROM ghosts"),
+            ExecError::TableNotFound(_)
+        ));
+        assert!(matches!(
+            run_err(
+                &engine,
+                "EXPLAIN SELECT * FROM users JOIN ghosts ON users.id = ghosts.id"
+            ),
+            ExecError::TableNotFound(_)
+        ));
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn show_tables_and_describe() {
+        let (engine, p) = temp_engine();
+        assert!(run(&engine, "SHOW TABLES").rows.is_empty());
+        people(&engine);
+        run(&engine, "CREATE TABLE a_first (x INTEGER)");
+        run(&engine, "CREATE INDEX idx_age ON users (age)");
+        assert_eq!(
+            col(&run(&engine, "SHOW TABLES"), 0),
+            vec!["a_first", "users"]
+        );
+
+        let d = run(&engine, "DESCRIBE users");
+        assert_eq!(d.columns, vec!["column", "type", "index"]);
+        assert_eq!(col(&d, 0), vec!["id", "name", "age"]);
+        assert_eq!(col(&d, 1), vec!["INTEGER", "TEXT", "INTEGER"]);
+        assert_eq!(col(&d, 2), vec!["", "", "idx_age"]);
+        assert!(matches!(
+            run_err(&engine, "DESCRIBE ghosts"),
+            ExecError::TableNotFound(_)
+        ));
         let _ = std::fs::remove_file(p);
     }
 }

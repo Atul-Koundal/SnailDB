@@ -11,6 +11,13 @@ pub enum ColType {
 }
 
 impl ColType {
+    pub fn name(&self) -> &'static str {
+        match self {
+            ColType::Integer => "INTEGER",
+            ColType::Text => "TEXT",
+        }
+    }
+
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_uppercase().as_str() {
