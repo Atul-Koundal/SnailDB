@@ -1,4 +1,4 @@
-"""Micro-benchmark: raw engine query vs. semantic cache hit.
+"""Micro-benchmark: full scan vs. index lookup, and raw engine query vs. semantic cache hit.
 
 Usage:
     python benchmarks/bench.py                 # real embedding model
@@ -60,6 +60,13 @@ def main():
                 for i in range(start, min(start + batch, args.rows))
             )
             db.execute(f"INSERT INTO users (id, name, age) VALUES {values}")
+
+        # Point lookup: full scan vs. index
+        lookup = f"SELECT * FROM users WHERE id = {args.rows // 2}"
+        scan = summarize("point lookup, full scan", timed_ms(lambda: db.execute(lookup), args.repeat))
+        db.execute("CREATE INDEX idx_users_id ON users (id)")
+        idx = summarize("point lookup, indexed", timed_ms(lambda: db.execute(lookup), args.repeat))
+        print(f"\n  index speedup: {scan / idx:,.1f}x\n")
 
         query = "SELECT * FROM users WHERE age > 60"
         print(f"\nSnailDB benchmark: {args.rows} rows, {args.repeat} repetitions\n")

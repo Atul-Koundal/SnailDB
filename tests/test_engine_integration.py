@@ -78,3 +78,14 @@ def test_group_by_having_through_bridge(db):
     )
     assert result["columns"] == ["region", "SUM(amount)"]
     assert result["rows"] == [["east", "100"], ["north", "30"]]
+
+
+def test_index_through_bridge(db):
+    db.execute("CREATE TABLE t (id INTEGER, name TEXT)")
+    db.execute("INSERT INTO t (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'c')")
+    message = db.execute("CREATE INDEX idx_id ON t (id)")["message"]
+    assert "3 row(s) indexed" in message
+    db.execute("INSERT INTO t (id, name) VALUES (4, 'd')")
+    assert db.execute("SELECT name FROM t WHERE id >= 3")["rows"] == [["c"], ["d"]]
+    with pytest.raises(RuntimeError):
+        db.execute("CREATE INDEX idx_id ON t (name)")
