@@ -31,6 +31,8 @@ def ask():
         ("total amount of orders", "SELECT SUM(amount) FROM orders"),
         ("maximum age of users", "SELECT MAX(age) FROM users"),
         ("lowest amount in orders", "SELECT MIN(amount) FROM orders"),
+        ("how many users per age", "SELECT age, COUNT(*) FROM users GROUP BY age"),
+        ("total amount of orders for each user_id", "SELECT user_id, SUM(amount) FROM orders GROUP BY user_id"),
     ],
 )
 def test_rule_based_translation(ask, question, expected):
@@ -48,3 +50,13 @@ def test_no_tables_registered_returns_none(ask):
 def test_translation_is_recorded_in_history(ask):
     ask.translate("show me all users", TABLES)
     assert ask.history[-1]["sql"] == "SELECT * FROM users"
+
+
+def test_table_name_inside_a_column_name_is_not_a_table_mention(ask):
+    # "user_id" must not make us pick `users` over `orders`
+    sql = ask.translate("total amount of orders for each user_id", TABLES)
+    assert "FROM orders" in sql
+
+
+def test_first_mentioned_table_wins(ask):
+    assert "FROM orders" in ask.translate("show orders for users", TABLES)

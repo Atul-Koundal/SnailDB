@@ -35,7 +35,22 @@ class AskTranslator:
         return None
 
     def _find_table(self, q: str, known_tables: list[str]) -> Optional[str]:
-        """Find the first known table name mentioned in the question."""
+        """Find the known table mentioned in the question.
+
+        Whole-word matches win (so `user_id` does not count as a mention of `users`),
+        and when several tables are mentioned the one that appears first is used.
+        Falls back to a substring match for loosely worded questions.
+        """
+        best: Optional[tuple[int, str]] = None
+        for table in known_tables:
+            name = table.lower()
+            for variant in {name, name.rstrip("s")}:
+                match = re.search(rf"\b{re.escape(variant)}\b", q)
+                if match and (best is None or match.start() < best[0]):
+                    best = (match.start(), table)
+        if best:
+            return best[1]
+
         for table in known_tables:
             if table.lower() in q or table.lower().rstrip("s") in q:
                 return table
@@ -189,10 +204,16 @@ class AskTranslator:
         # Aggregates: "how many users", "average age of users", ...
         aggregate = self._extract_aggregate(q, table)
         if aggregate:
-            sql = f"SELECT {aggregate} FROM {table}"
+            # "... per region" / "... for each region" / "... grouped by region"
+            group = re.search(r"\b(?:per|for each|grouped by|group by)\s+(\w+)", q)
+            group_col = group.group(1) if group else None
+            select_list = f"{group_col}, {aggregate}" if group_col else aggregate
+            sql = f"SELECT {select_list} FROM {table}"
             condition = self._extract_condition(q)
             if condition:
                 sql += f" WHERE {condition}"
+            if group_col:
+                sql += f" GROUP BY {group_col}"
             return sql
 
         # SELECT (default)
