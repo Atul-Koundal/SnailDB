@@ -1,4 +1,4 @@
-use crate::catalog::{Catalog, ColType, Column, Schema};
+use crate::catalog::{Catalog, ColType, Column, IndexDef, Schema};
 use crate::sql::ast::*;
 use crate::storage::Storage;
 use serde_json::{Map, Value as JsonValue};
@@ -20,6 +20,10 @@ pub enum ExecError {
     ColumnCountMismatch { expected: usize, got: usize },
     #[error("column '{0}' must appear in GROUP BY or be used in an aggregate function")]
     InvalidAggregate(String),
+    #[error("index '{0}' already exists")]
+    IndexExists(String),
+    #[error("column '{col}' of table '{table}' is already indexed")]
+    ColumnAlreadyIndexed { table: String, col: String },
     #[error("integer overflow while computing {0}")]
     Overflow(String),
     #[error("type mismatch for column '{col}': expected {expected}, got {got}")]
@@ -62,6 +66,7 @@ impl Engine {
     pub fn execute(&self, stmt: Stmt) -> Result<QueryResult> {
         match stmt {
             Stmt::CreateTable(s) => self.exec_create(s),
+            Stmt::CreateIndex(s) => self.exec_create_index(s),
             Stmt::Insert(s) => self.exec_insert(s),
             Stmt::Select(s) => self.exec_select(s),
             Stmt::Update(s) => self.exec_update(s),
@@ -120,8 +125,9 @@ impl Engine {
             }
             let row_id = self.next_row_id(&stmt.table_name)?;
             let key = row_key(&stmt.table_name, row_id);
-            let bytes = serde_json::to_vec(&JsonValue::Object(map))?;
+            let bytes = serde_json::to_vec(&JsonValue::Object(map.clone()))?;
             self.storage.put(&key, &bytes)?;
+            self.put_index_entries(&schema, row_id, &map)?;
             inserted += 1;
         }
         Ok(QueryResult::message(&format!(
@@ -138,8 +144,14 @@ impl Engine {
             .get_schema(&stmt.table_name)
             .map_err(|_| ExecError::TableNotFound(stmt.table_name.clone()))?;
 
-        let prefix = format!("row:{}:", stmt.table_name);
-        let raw_left = self.storage.scan_prefix(prefix.as_bytes())?;
+        // An index can narrow the base-table scan. With joins the WHERE columns may belong
+        // to either table, so joins always use a full scan.
+        let index_where = if stmt.joins.is_empty() {
+            stmt.where_clause.as_ref()
+        } else {
+            None
+        };
+        let raw_left = self.scan_rows(&stmt.table_name, &left_schema, index_where)?;
 
         // Each "combined row" is a flat map of "table.column" -> value
         // This lets us handle both qualified and unqualified column refs.
@@ -357,12 +369,12 @@ impl Engine {
             }
         }
 
-        let prefix = format!("row:{}:", stmt.table_name);
-        let raw_rows = self.storage.scan_prefix(prefix.as_bytes())?;
+        let raw_rows = self.scan_rows(&stmt.table_name, &schema, stmt.where_clause.as_ref())?;
         let mut updated = 0usize;
 
         for (key, bytes) in raw_rows {
             let mut obj: Map<String, JsonValue> = serde_json::from_slice(&bytes)?;
+            let old_obj = obj.clone();
             if let Some(expr) = &stmt.where_clause {
                 if !eval_expr(expr, &obj) {
                     continue;
@@ -378,8 +390,9 @@ impl Engine {
                     coerce_value(&assignment.value, &schema_col.col_type, &assignment.column)?;
                 obj.insert(assignment.column.clone(), json_val);
             }
-            let new_bytes = serde_json::to_vec(&JsonValue::Object(obj))?;
+            let new_bytes = serde_json::to_vec(&JsonValue::Object(obj.clone()))?;
             self.storage.put(&key, &new_bytes)?;
+            self.reindex_row(&schema, row_id_from_key(&key), &old_obj, &obj)?;
             updated += 1;
         }
         Ok(QueryResult::message(&format!(
@@ -390,12 +403,11 @@ impl Engine {
 
     fn exec_delete(&self, stmt: DeleteStmt) -> Result<QueryResult> {
         let catalog = Catalog::new(&self.storage);
-        catalog
+        let schema = catalog
             .get_schema(&stmt.table_name)
             .map_err(|_| ExecError::TableNotFound(stmt.table_name.clone()))?;
 
-        let prefix = format!("row:{}:", stmt.table_name);
-        let raw_rows = self.storage.scan_prefix(prefix.as_bytes())?;
+        let raw_rows = self.scan_rows(&stmt.table_name, &schema, stmt.where_clause.as_ref())?;
         let mut deleted = 0usize;
 
         for (key, bytes) in raw_rows {
@@ -406,12 +418,182 @@ impl Engine {
                 }
             }
             self.storage.delete(&key)?;
+            self.delete_index_entries(&schema, row_id_from_key(&key), &obj)?;
             deleted += 1;
         }
         Ok(QueryResult::message(&format!(
             "{} row(s) deleted.",
             deleted
         )))
+    }
+
+    fn exec_create_index(&self, stmt: CreateIndexStmt) -> Result<QueryResult> {
+        let catalog = Catalog::new(&self.storage);
+        let mut schema = catalog
+            .get_schema(&stmt.table_name)
+            .map_err(|_| ExecError::TableNotFound(stmt.table_name.clone()))?;
+
+        if schema.column_index(&stmt.column).is_none() {
+            return Err(ExecError::ColumnNotFound(
+                stmt.column.clone(),
+                stmt.table_name.clone(),
+            ));
+        }
+        // Index names are unique across the whole database.
+        for table in catalog.list_tables()? {
+            if catalog
+                .get_schema(&table)?
+                .indexes
+                .iter()
+                .any(|i| i.name == stmt.index_name)
+            {
+                return Err(ExecError::IndexExists(stmt.index_name));
+            }
+        }
+        if schema.indexes.iter().any(|i| i.column == stmt.column) {
+            return Err(ExecError::ColumnAlreadyIndexed {
+                table: stmt.table_name,
+                col: stmt.column,
+            });
+        }
+
+        // Backfill entries for rows that already exist.
+        let prefix = format!("row:{}:", stmt.table_name);
+        let mut indexed = 0usize;
+        for (key, bytes) in self.storage.scan_prefix(prefix.as_bytes())? {
+            let obj: Map<String, JsonValue> = serde_json::from_slice(&bytes)?;
+            let entry = index_entry_key(
+                &stmt.table_name,
+                &stmt.column,
+                &encode_index_json(obj.get(&stmt.column)),
+                row_id_from_key(&key),
+            );
+            self.storage.put(&entry, b"")?;
+            indexed += 1;
+        }
+
+        schema.indexes.push(IndexDef {
+            name: stmt.index_name.clone(),
+            column: stmt.column.clone(),
+        });
+        catalog.save_schema(&schema)?;
+        Ok(QueryResult::message(&format!(
+            "Index '{}' created on {}({}), {} row(s) indexed.",
+            stmt.index_name, stmt.table_name, stmt.column, indexed
+        )))
+    }
+
+    // ── Index maintenance ─────────────────────────────────────────────
+
+    fn put_index_entries(
+        &self,
+        schema: &Schema,
+        row_id: u64,
+        row: &Map<String, JsonValue>,
+    ) -> Result<()> {
+        for idx in &schema.indexes {
+            let enc = encode_index_json(row.get(&idx.column));
+            let key = index_entry_key(&schema.table_name, &idx.column, &enc, row_id);
+            self.storage.put(&key, b"")?;
+        }
+        Ok(())
+    }
+
+    fn delete_index_entries(
+        &self,
+        schema: &Schema,
+        row_id: u64,
+        row: &Map<String, JsonValue>,
+    ) -> Result<()> {
+        for idx in &schema.indexes {
+            let enc = encode_index_json(row.get(&idx.column));
+            let key = index_entry_key(&schema.table_name, &idx.column, &enc, row_id);
+            self.storage.delete(&key)?;
+        }
+        Ok(())
+    }
+
+    /// After an UPDATE: move index entries whose indexed value changed.
+    fn reindex_row(
+        &self,
+        schema: &Schema,
+        row_id: u64,
+        old: &Map<String, JsonValue>,
+        new: &Map<String, JsonValue>,
+    ) -> Result<()> {
+        for idx in &schema.indexes {
+            let old_enc = encode_index_json(old.get(&idx.column));
+            let new_enc = encode_index_json(new.get(&idx.column));
+            if old_enc != new_enc {
+                let table = &schema.table_name;
+                self.storage
+                    .delete(&index_entry_key(table, &idx.column, &old_enc, row_id))?;
+                self.storage
+                    .put(&index_entry_key(table, &idx.column, &new_enc, row_id), b"")?;
+            }
+        }
+        Ok(())
+    }
+
+    // ── Row access ────────────────────────────────────────────────────
+
+    /// Rows of `table` that may satisfy `where_clause`, as `(row key, JSON bytes)` in
+    /// row-id order. Uses an index when one applies, otherwise a full scan. Callers
+    /// still evaluate the full WHERE expression, so an index only ever narrows the
+    /// candidate set and never changes results.
+    fn scan_rows(
+        &self,
+        table: &str,
+        schema: &Schema,
+        where_clause: Option<&Expr>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        if let Some(lookup) = where_clause.and_then(|w| choose_index(schema, w)) {
+            let mut rows = Vec::new();
+            for key in self.index_candidate_keys(table, &lookup)? {
+                if let Some(bytes) = self.storage.get(&key)? {
+                    rows.push((key, bytes));
+                }
+            }
+            return Ok(rows);
+        }
+        let prefix = format!("row:{}:", table);
+        Ok(self.storage.scan_prefix(prefix.as_bytes())?)
+    }
+
+    /// Row keys whose indexed value satisfies the lookup, sorted by row id so results
+    /// come back in the same order as a full scan.
+    fn index_candidate_keys(&self, table: &str, lookup: &IndexLookup) -> Result<Vec<Vec<u8>>> {
+        let base = index_prefix(table, &lookup.index.column);
+        let enc = encode_index_value(&lookup.value).unwrap_or_default();
+        let tag = &enc[..1];
+
+        let entries = match lookup.op {
+            CmpOp::Eq => self
+                .storage
+                .scan_prefix(format!("{}{}{}", base, enc, SEP).as_bytes())?,
+            CmpOp::Gt => self.storage.scan_range(
+                format!("{}{}{}", base, enc, AFTER_SEP).as_bytes(),
+                format!("{}{}{}", base, tag, TAG_END).as_bytes(),
+            )?,
+            CmpOp::Gte => self.storage.scan_range(
+                format!("{}{}{}", base, enc, SEP).as_bytes(),
+                format!("{}{}{}", base, tag, TAG_END).as_bytes(),
+            )?,
+            CmpOp::Lt => self.storage.scan_range(
+                format!("{}{}", base, tag).as_bytes(),
+                format!("{}{}{}", base, enc, SEP).as_bytes(),
+            )?,
+            CmpOp::Lte => self.storage.scan_range(
+                format!("{}{}", base, tag).as_bytes(),
+                format!("{}{}{}", base, enc, AFTER_SEP).as_bytes(),
+            )?,
+            CmpOp::NotEq => unreachable!("choose_index never selects !="),
+        };
+
+        let mut ids: Vec<u64> = entries.iter().map(|(k, _)| row_id_from_key(k)).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        Ok(ids.into_iter().map(|id| row_key(table, id)).collect())
     }
 
     fn next_row_id(&self, table_name: &str) -> Result<u64> {
@@ -460,6 +642,119 @@ fn coerce_value(val: &Value, col_type: &ColType, col_name: &str) -> Result<JsonV
                 got: format!("'{}'", s),
             }),
     }
+}
+
+// ── Index keys and planning ───────────────────────────────────────────────────
+//
+// Index entry key:  idx:<table>:<column>:<encoded value>!<row id, 20 digits>
+//
+// The encoded value is order-preserving: integers are `i` + 16 hex digits of the
+// sign-flipped value, text is `t` + hex of its bytes, NULL is `n`. The separator `!`
+// (0x21) sorts below every hex digit, so entries order by value, then by row id.
+
+const SEP: char = '!';
+/// Sorts directly after every `<enc>!<id>` entry of the same value.
+const AFTER_SEP: char = '"';
+/// Sorts after every encoded value of one type tag.
+const TAG_END: char = '~';
+
+fn index_prefix(table: &str, column: &str) -> String {
+    format!("idx:{}:{}:", table, column)
+}
+
+fn index_entry_key(table: &str, column: &str, enc: &str, row_id: u64) -> Vec<u8> {
+    format!(
+        "{}{}{}{:020}",
+        index_prefix(table, column),
+        enc,
+        SEP,
+        row_id
+    )
+    .into_bytes()
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+fn encode_int(n: i64) -> String {
+    format!("i{:016x}", (n as u64) ^ (1u64 << 63))
+}
+
+/// Encode a stored JSON value (a missing column counts as NULL).
+fn encode_index_json(v: Option<&JsonValue>) -> String {
+    match v {
+        Some(JsonValue::Number(n)) if n.is_i64() => encode_int(n.as_i64().unwrap()),
+        Some(JsonValue::String(s)) => format!("t{}", hex(s.as_bytes())),
+        _ => "n".to_string(),
+    }
+}
+
+/// Encode a literal from a WHERE clause. NULL has no encoding: comparisons with NULL
+/// never match, so they never use an index.
+fn encode_index_value(v: &Value) -> Option<String> {
+    match v {
+        Value::Integer(n) => Some(encode_int(*n)),
+        Value::Text(s) => Some(format!("t{}", hex(s.as_bytes()))),
+        Value::Null => None,
+    }
+}
+
+fn row_id_from_key(key: &[u8]) -> u64 {
+    let s = String::from_utf8_lossy(key);
+    s.rsplit([':', SEP])
+        .next()
+        .and_then(|id| id.parse().ok())
+        .unwrap_or(0)
+}
+
+/// A WHERE condition that an index can answer.
+#[derive(Debug, Clone, PartialEq)]
+struct IndexLookup {
+    index: IndexDef,
+    op: CmpOp,
+    value: Value,
+}
+
+/// Collect the AND-ed conditions of an expression. Anything under an OR is left out:
+/// an index cannot answer a disjunction on its own.
+fn conjuncts<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+    match expr {
+        Expr::And(l, r) => {
+            conjuncts(l, out);
+            conjuncts(r, out);
+        }
+        Expr::Or(_, _) => {}
+        cmp => out.push(cmp),
+    }
+}
+
+/// Pick an index to answer (part of) a WHERE clause. Prefers equality over ranges.
+/// `!=` and NULL comparisons are never indexable.
+fn choose_index(schema: &Schema, where_clause: &Expr) -> Option<IndexLookup> {
+    let mut parts = Vec::new();
+    conjuncts(where_clause, &mut parts);
+
+    let mut best: Option<IndexLookup> = None;
+    for part in parts {
+        if let Expr::Comparison { column, op, value } = part {
+            if *op == CmpOp::NotEq || *value == Value::Null {
+                continue;
+            }
+            if let Some(index) = schema.indexes.iter().find(|i| &i.column == column) {
+                let candidate = IndexLookup {
+                    index: index.clone(),
+                    op: op.clone(),
+                    value: value.clone(),
+                };
+                if candidate.op == CmpOp::Eq {
+                    return Some(candidate);
+                }
+                best.get_or_insert(candidate);
+            }
+        }
+    }
+    best
 }
 
 // ── Column lookup ─────────────────────────────────────────────────────────────
@@ -1632,5 +1927,259 @@ mod tests {
         let err = run_err(&engine, "SELECT * FROM sales ORDER BY COUNT(*) DESC");
         assert!(matches!(err, ExecError::InvalidAggregate(_)));
         let _ = std::fs::remove_file(p);
+    }
+
+    fn index_entry_count(engine: &Engine, table: &str, column: &str) -> usize {
+        engine
+            .storage
+            .scan_prefix(index_prefix(table, column).as_bytes())
+            .unwrap()
+            .len()
+    }
+
+    /// Run the same SELECT on a table with and without an index and demand identical output.
+    fn assert_same_with_and_without_index(setup: &[&str], index_sql: &str, queries: &[&str]) {
+        let (plain, p1) = temp_engine();
+        let (indexed, p2) = temp_engine();
+        for sql in setup {
+            run(&plain, sql);
+            run(&indexed, sql);
+        }
+        run(&indexed, index_sql);
+        for q in queries {
+            let a = run(&plain, q);
+            let b = run(&indexed, q);
+            assert_eq!(a.rows, b.rows, "query differs with index: {q}");
+        }
+        let _ = std::fs::remove_file(p1);
+        let _ = std::fs::remove_file(p2);
+    }
+
+    #[test]
+    fn create_index_reports_and_validates() {
+        let (engine, p) = temp_engine();
+        people(&engine);
+        let result = run(&engine, "CREATE INDEX idx_age ON users (age)");
+        assert!(result.message.unwrap().contains("4 row(s) indexed"));
+        assert!(matches!(
+            run_err(&engine, "CREATE INDEX idx_age ON users (name)"),
+            ExecError::IndexExists(_)
+        ));
+        assert!(matches!(
+            run_err(&engine, "CREATE INDEX idx_other ON users (age)"),
+            ExecError::ColumnAlreadyIndexed { .. }
+        ));
+        assert!(matches!(
+            run_err(&engine, "CREATE INDEX i2 ON users (nope)"),
+            ExecError::ColumnNotFound(_, _)
+        ));
+        assert!(matches!(
+            run_err(&engine, "CREATE INDEX i3 ON ghosts (id)"),
+            ExecError::TableNotFound(_)
+        ));
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn index_name_is_unique_across_tables() {
+        let (engine, p) = temp_engine();
+        people(&engine);
+        run(&engine, "CREATE TABLE t (a INTEGER)");
+        run(&engine, "CREATE INDEX shared ON users (age)");
+        assert!(matches!(
+            run_err(&engine, "CREATE INDEX shared ON t (a)"),
+            ExecError::IndexExists(_)
+        ));
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn indexed_integer_queries_match_full_scan() {
+        // negative numbers, duplicates and NULLs exercise the order-preserving encoding
+        let setup = [
+            "CREATE TABLE t (id INTEGER, n INTEGER)",
+            "INSERT INTO t (id, n) VALUES (1, 5), (2, -3), (3, 5), (4, 0), (5, NULL), (6, 100), (7, -100), (8, 7)",
+        ];
+        let queries = [
+            "SELECT * FROM t WHERE n = 5",
+            "SELECT * FROM t WHERE n = -3",
+            "SELECT * FROM t WHERE n > 0",
+            "SELECT * FROM t WHERE n >= 0",
+            "SELECT * FROM t WHERE n < 0",
+            "SELECT * FROM t WHERE n <= 0",
+            "SELECT * FROM t WHERE n > 5 AND id > 1",
+            "SELECT * FROM t WHERE n = 5 OR n = 100",
+            "SELECT * FROM t WHERE n != 5",
+            "SELECT * FROM t WHERE n > 1000",
+            "SELECT * FROM t WHERE n < -1000",
+            "SELECT * FROM t WHERE n = 'five'",
+        ];
+        assert_same_with_and_without_index(&setup, "CREATE INDEX idx_n ON t (n)", &queries);
+    }
+
+    #[test]
+    fn indexed_text_queries_match_full_scan() {
+        let setup = [
+            "CREATE TABLE t (id INTEGER, s TEXT)",
+            "INSERT INTO t (id, s) VALUES (1, 'a'), (2, 'ab'), (3, 'abc'), (4, 'b'), (5, ''), (6, 'a:b'), (7, 'B'), (8, NULL), (9, 'ab')",
+        ];
+        let queries = [
+            "SELECT * FROM t WHERE s = 'ab'",
+            "SELECT * FROM t WHERE s = ''",
+            "SELECT * FROM t WHERE s > 'a'",
+            "SELECT * FROM t WHERE s >= 'ab'",
+            "SELECT * FROM t WHERE s < 'b'",
+            "SELECT * FROM t WHERE s <= 'a:b'",
+            "SELECT * FROM t WHERE s > 'zzz'",
+            "SELECT * FROM t WHERE s = 5",
+        ];
+        assert_same_with_and_without_index(&setup, "CREATE INDEX idx_s ON t (s)", &queries);
+    }
+
+    #[test]
+    fn index_is_backfilled_and_maintained_on_insert_update_delete() {
+        let (engine, p) = temp_engine();
+        people(&engine);
+        run(&engine, "CREATE INDEX idx_age ON users (age)");
+        assert_eq!(index_entry_count(&engine, "users", "age"), 4);
+
+        run(
+            &engine,
+            "INSERT INTO users (id, name, age) VALUES (5, 'Eve', 30)",
+        );
+        assert_eq!(index_entry_count(&engine, "users", "age"), 5);
+        let r = run(
+            &engine,
+            "SELECT name FROM users WHERE age = 30 ORDER BY name ASC",
+        );
+        assert_eq!(col(&r, 0), vec!["Alice", "Eve"]);
+
+        run(&engine, "UPDATE users SET age = 31 WHERE name = 'Alice'");
+        assert_eq!(index_entry_count(&engine, "users", "age"), 5);
+        assert_eq!(
+            run(&engine, "SELECT * FROM users WHERE age = 30")
+                .rows
+                .len(),
+            1
+        );
+        assert_eq!(
+            run(&engine, "SELECT * FROM users WHERE age = 31")
+                .rows
+                .len(),
+            1
+        );
+
+        run(&engine, "DELETE FROM users WHERE age = 31");
+        assert_eq!(index_entry_count(&engine, "users", "age"), 4);
+        assert!(run(&engine, "SELECT * FROM users WHERE age = 31")
+            .rows
+            .is_empty());
+
+        run(&engine, "DELETE FROM users");
+        assert_eq!(index_entry_count(&engine, "users", "age"), 0);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn update_through_index_changes_only_matching_rows() {
+        let (engine, p) = temp_engine();
+        people(&engine);
+        run(&engine, "CREATE INDEX idx_age ON users (age)");
+        let r = run(&engine, "UPDATE users SET name = 'X' WHERE age >= 25");
+        assert_eq!(r.message.unwrap(), "2 row(s) updated.");
+        let r = run(&engine, "SELECT name FROM users ORDER BY id ASC");
+        assert_eq!(col(&r, 0), vec!["X", "Bob", "X", "Dave"]);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn index_survives_reopen() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let mut path = std::env::temp_dir();
+        path.push(format!("snaildb_idx_reopen_{}.redb", n));
+        {
+            let e = Engine::open(path.to_str().unwrap()).unwrap();
+            run(&e, "CREATE TABLE t (a INTEGER)");
+            run(&e, "INSERT INTO t (a) VALUES (1), (2)");
+            run(&e, "CREATE INDEX ia ON t (a)");
+        }
+        let e = Engine::open(path.to_str().unwrap()).unwrap();
+        run(&e, "INSERT INTO t (a) VALUES (3)");
+        assert_eq!(index_entry_count(&e, "t", "a"), 3);
+        assert_eq!(run(&e, "SELECT * FROM t WHERE a >= 2").rows.len(), 2);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn indexes_are_ignored_for_joins_but_results_stay_correct() {
+        let (engine, p) = temp_engine();
+        run(&engine, "CREATE TABLE users (id INTEGER, name TEXT)");
+        run(
+            &engine,
+            "CREATE TABLE orders (id INTEGER, user_id INTEGER, amount INTEGER)",
+        );
+        run(&engine, "CREATE INDEX idx_amount ON orders (amount)");
+        run(
+            &engine,
+            "INSERT INTO users (id, name) VALUES (1, 'Alice'), (2, 'Bob')",
+        );
+        run(
+            &engine,
+            "INSERT INTO orders (id, user_id, amount) VALUES (1, 1, 100), (2, 1, 200), (3, 2, 50)",
+        );
+        let r = run(
+            &engine,
+            "SELECT users.name FROM users INNER JOIN orders ON users.id = orders.user_id WHERE amount > 60",
+        );
+        assert_eq!(r.rows.len(), 2);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn choose_index_prefers_equality_and_skips_unusable_conditions() {
+        let mut schema = Schema::new(
+            "t",
+            vec![
+                Column {
+                    name: "a".into(),
+                    col_type: ColType::Integer,
+                },
+                Column {
+                    name: "b".into(),
+                    col_type: ColType::Integer,
+                },
+            ],
+        );
+        schema.indexes.push(IndexDef {
+            name: "ia".into(),
+            column: "a".into(),
+        });
+        schema.indexes.push(IndexDef {
+            name: "ib".into(),
+            column: "b".into(),
+        });
+
+        let where_of = |sql: &str| -> Expr {
+            match Parser::new(Lexer::new(sql).tokenize().unwrap())
+                .parse()
+                .unwrap()
+            {
+                Stmt::Select(s) => s.where_clause.unwrap(),
+                _ => unreachable!(),
+            }
+        };
+
+        // equality beats an earlier range condition
+        let pick =
+            choose_index(&schema, &where_of("SELECT * FROM t WHERE a > 1 AND b = 2")).unwrap();
+        assert_eq!((pick.index.name.as_str(), pick.op), ("ib", CmpOp::Eq));
+        // range is used when it is all there is
+        let pick = choose_index(&schema, &where_of("SELECT * FROM t WHERE a < 9")).unwrap();
+        assert_eq!(pick.index.name, "ia");
+        // not indexable: !=, NULL, OR, non-indexed column
+        assert!(choose_index(&schema, &where_of("SELECT * FROM t WHERE a != 1")).is_none());
+        assert!(choose_index(&schema, &where_of("SELECT * FROM t WHERE a = NULL")).is_none());
+        assert!(choose_index(&schema, &where_of("SELECT * FROM t WHERE a = 1 OR b = 2")).is_none());
+        assert!(choose_index(&schema, &where_of("SELECT * FROM t WHERE c = 1")).is_none());
     }
 }

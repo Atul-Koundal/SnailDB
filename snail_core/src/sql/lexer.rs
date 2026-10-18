@@ -166,6 +166,7 @@ impl<'a> Lexer<'a> {
             "RIGHT" => Token::Right,
             "ON" => Token::On,
             "GROUP" => Token::Group,
+            "INDEX" => Token::Index,
             "HAVING" => Token::Having,
             _ => Token::Ident(word.to_string()),
         }
@@ -254,5 +255,12 @@ mod tests {
         let tokens = lex("SELECT age FROM t GROUP BY age HAVING COUNT(*) > 1");
         assert!(tokens.contains(&Token::Group));
         assert!(tokens.contains(&Token::Having));
+    }
+
+    #[test]
+    fn index_keyword() {
+        let tokens = lex("CREATE INDEX idx ON t (a)");
+        assert_eq!(tokens[0], Token::Create);
+        assert_eq!(tokens[1], Token::Index);
     }
 }

@@ -90,6 +90,9 @@ impl Parser {
 
     fn parse_create(&mut self) -> Result<Stmt> {
         self.expect(&Token::Create)?;
+        if self.peek() == Some(&Token::Index) {
+            return self.parse_create_index();
+        }
         self.expect(&Token::Table)?;
         let table_name = self.expect_ident()?;
         self.expect(&Token::LParen)?;
@@ -111,6 +114,21 @@ impl Parser {
         Ok(Stmt::CreateTable(CreateTableStmt {
             table_name,
             columns,
+        }))
+    }
+
+    fn parse_create_index(&mut self) -> Result<Stmt> {
+        self.expect(&Token::Index)?;
+        let index_name = self.expect_ident()?;
+        self.expect(&Token::On)?;
+        let table_name = self.expect_ident()?;
+        self.expect(&Token::LParen)?;
+        let column = self.expect_ident()?;
+        self.expect(&Token::RParen)?;
+        Ok(Stmt::CreateIndex(CreateIndexStmt {
+            index_name,
+            table_name,
+            column,
         }))
     }
 
@@ -855,6 +873,33 @@ mod tests {
                 assert_eq!(s.limit, Some(3));
             }
             _ => panic!("wrong stmt"),
+        }
+    }
+
+    #[test]
+    fn parse_create_index() {
+        match parse("CREATE INDEX idx_age ON users (age)") {
+            Stmt::CreateIndex(s) => {
+                assert_eq!(s.index_name, "idx_age");
+                assert_eq!(s.table_name, "users");
+                assert_eq!(s.column, "age");
+            }
+            _ => panic!("wrong stmt"),
+        }
+    }
+
+    #[test]
+    fn create_index_requires_on_and_column() {
+        for sql in [
+            "CREATE INDEX idx users (age)",
+            "CREATE INDEX idx ON users age",
+            "CREATE INDEX ON users (age)",
+        ] {
+            let tokens = Lexer::new(sql).tokenize().unwrap();
+            assert!(
+                Parser::new(tokens).parse().is_err(),
+                "{sql} should not parse"
+            );
         }
     }
 }

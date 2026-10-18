@@ -3,6 +3,7 @@ use crate::catalog::ColType;
 #[derive(Debug, Clone)]
 pub enum Stmt {
     CreateTable(CreateTableStmt),
+    CreateIndex(CreateIndexStmt),
     Insert(InsertStmt),
     Select(SelectStmt),
     Update(UpdateStmt),
@@ -21,6 +22,14 @@ pub struct CreateTableStmt {
 pub struct ColumnDef {
     pub name: String,
     pub col_type: ColType,
+}
+
+/// `CREATE INDEX name ON table (column)`
+#[derive(Debug, Clone)]
+pub struct CreateIndexStmt {
+    pub index_name: String,
+    pub table_name: String,
+    pub column: String,
 }
 
 // ── INSERT ────────────────────────────────────────────────────────────────────

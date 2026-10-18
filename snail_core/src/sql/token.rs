@@ -27,6 +27,7 @@ pub enum Token {
     Right,
     On,
     Group,
+    Index,
     Having,
 
     // ── Identifiers & literals ────────────────────────────────────────
