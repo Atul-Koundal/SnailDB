@@ -47,7 +47,73 @@ pub struct SelectStmt {
 #[derive(Debug, Clone)]
 pub enum SelectColumns {
     Star,
+    /// Plain column references only (`SELECT id, users.name ...`).
     Named(Vec<ColumnRef>),
+    /// Select list containing at least one aggregate (`SELECT COUNT(*), age ...`).
+    Items(Vec<SelectItem>),
+}
+
+/// One entry of a select list that contains aggregates.
+#[derive(Debug, Clone)]
+pub enum SelectItem {
+    Column(ColumnRef),
+    Aggregate(AggregateExpr),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AggFunc {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
+impl AggFunc {
+    /// Case-insensitive lookup, e.g. `"count"` -> `Some(AggFunc::Count)`.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.to_uppercase().as_str() {
+            "COUNT" => Some(AggFunc::Count),
+            "SUM" => Some(AggFunc::Sum),
+            "AVG" => Some(AggFunc::Avg),
+            "MIN" => Some(AggFunc::Min),
+            "MAX" => Some(AggFunc::Max),
+            _ => None,
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            AggFunc::Count => "COUNT",
+            AggFunc::Sum => "SUM",
+            AggFunc::Avg => "AVG",
+            AggFunc::Min => "MIN",
+            AggFunc::Max => "MAX",
+        }
+    }
+}
+
+/// Argument of an aggregate: `*` (only valid for COUNT) or a column.
+#[derive(Debug, Clone)]
+pub enum AggArg {
+    Star,
+    Column(ColumnRef),
+}
+
+#[derive(Debug, Clone)]
+pub struct AggregateExpr {
+    pub func: AggFunc,
+    pub arg: AggArg,
+}
+
+impl AggregateExpr {
+    /// Output column header, e.g. `COUNT(*)` or `SUM(orders.amount)`.
+    pub fn display_name(&self) -> String {
+        match &self.arg {
+            AggArg::Star => format!("{}(*)", self.func.name()),
+            AggArg::Column(c) => format!("{}({})", self.func.name(), c.display_name()),
+        }
+    }
 }
 
 /// A column reference — either `col` or `table.col`

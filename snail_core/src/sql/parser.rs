@@ -15,6 +15,8 @@ pub enum ParseError {
     UnknownStatement(Token),
     #[error("invalid ON condition: expected table.column = table.column")]
     InvalidOnCondition,
+    #[error("{0}(*) is not valid: only COUNT accepts *")]
+    StarOnlyForCount(String),
 }
 
 pub type Result<T> = std::result::Result<T, ParseError>;
@@ -39,6 +41,10 @@ impl Parser {
 
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.pos)
+    }
+
+    fn peek_nth(&self, n: usize) -> Option<&Token> {
+        self.tokens.get(self.pos + n)
     }
 
     fn advance(&mut self) -> Option<&Token> {
@@ -155,15 +161,14 @@ impl Parser {
     fn parse_select(&mut self) -> Result<Stmt> {
         self.expect(&Token::Select)?;
 
-        // Column list — supports star, bare names, and table.column
+        // Column list — supports star, bare names, table.column and aggregates
         let columns = if self.peek() == Some(&Token::Star) {
             self.advance();
             SelectColumns::Star
         } else {
-            let mut cols = Vec::new();
+            let mut items = Vec::new();
             loop {
-                let col_ref = self.parse_column_ref()?;
-                cols.push(col_ref);
+                items.push(self.parse_select_item()?);
                 match self.peek() {
                     Some(Token::Comma) => {
                         self.advance();
@@ -171,7 +176,19 @@ impl Parser {
                     _ => break,
                 }
             }
-            SelectColumns::Named(cols)
+            if items.iter().any(|i| matches!(i, SelectItem::Aggregate(_))) {
+                SelectColumns::Items(items)
+            } else {
+                SelectColumns::Named(
+                    items
+                        .into_iter()
+                        .filter_map(|i| match i {
+                            SelectItem::Column(c) => Some(c),
+                            SelectItem::Aggregate(_) => None,
+                        })
+                        .collect(),
+                )
+            }
         };
 
         self.expect(&Token::From)?;
@@ -269,6 +286,32 @@ impl Parser {
             order_by,
             limit,
         }))
+    }
+
+    /// Parse one select-list entry: an aggregate such as `COUNT(*)` / `SUM(age)`,
+    /// or a plain (optionally qualified) column.
+    ///
+    /// Aggregate names are not keywords: `count` is only treated as a function
+    /// when it is directly followed by `(`, so columns named `count` or `max` still work.
+    fn parse_select_item(&mut self) -> Result<SelectItem> {
+        if let (Some(Token::Ident(name)), Some(Token::LParen)) = (self.peek(), self.peek_nth(1)) {
+            if let Some(func) = AggFunc::from_name(name) {
+                self.advance(); // function name
+                self.advance(); // (
+                let arg = if self.peek() == Some(&Token::Star) {
+                    if func != AggFunc::Count {
+                        return Err(ParseError::StarOnlyForCount(func.name().to_string()));
+                    }
+                    self.advance();
+                    AggArg::Star
+                } else {
+                    AggArg::Column(self.parse_column_ref()?)
+                };
+                self.expect(&Token::RParen)?;
+                return Ok(SelectItem::Aggregate(AggregateExpr { func, arg }));
+            }
+        }
+        Ok(SelectItem::Column(self.parse_column_ref()?))
     }
 
     /// Parse a column reference: either `col` or `table.col`
@@ -622,5 +665,67 @@ mod tests {
             }
             _ => panic!("wrong stmt"),
         }
+    }
+
+    #[test]
+    fn parse_count_star() {
+        let stmt = parse("SELECT COUNT(*) FROM users");
+        match stmt {
+            Stmt::Select(s) => match s.columns {
+                SelectColumns::Items(items) => {
+                    assert_eq!(items.len(), 1);
+                    match &items[0] {
+                        SelectItem::Aggregate(a) => {
+                            assert_eq!(a.func, AggFunc::Count);
+                            assert!(matches!(a.arg, AggArg::Star));
+                            assert_eq!(a.display_name(), "COUNT(*)");
+                        }
+                        _ => panic!("expected aggregate"),
+                    }
+                }
+                _ => panic!("expected Items"),
+            },
+            _ => panic!("wrong stmt"),
+        }
+    }
+
+    #[test]
+    fn parse_multiple_aggregates_case_insensitive() {
+        let stmt =
+            parse("SELECT count(*), Sum(age), AVG(users.age), min(age), MAX(age) FROM users");
+        match stmt {
+            Stmt::Select(s) => match s.columns {
+                SelectColumns::Items(items) => assert_eq!(items.len(), 5),
+                _ => panic!("expected Items"),
+            },
+            _ => panic!("wrong stmt"),
+        }
+    }
+
+    #[test]
+    fn parse_aggregate_with_where() {
+        let stmt = parse("SELECT SUM(amount) FROM orders WHERE amount > 10");
+        match stmt {
+            Stmt::Select(s) => assert!(s.where_clause.is_some()),
+            _ => panic!("wrong stmt"),
+        }
+    }
+
+    #[test]
+    fn column_named_like_aggregate_is_still_a_column() {
+        let stmt = parse("SELECT count, max FROM stats");
+        match stmt {
+            Stmt::Select(s) => assert!(matches!(s.columns, SelectColumns::Named(_))),
+            _ => panic!("wrong stmt"),
+        }
+    }
+
+    #[test]
+    fn sum_star_is_rejected() {
+        let tokens = Lexer::new("SELECT SUM(*) FROM t").tokenize().unwrap();
+        assert!(matches!(
+            Parser::new(tokens).parse(),
+            Err(ParseError::StarOnlyForCount(_))
+        ));
     }
 }

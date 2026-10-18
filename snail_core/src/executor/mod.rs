@@ -18,6 +18,10 @@ pub enum ExecError {
     ColumnNotFound(String, String),
     #[error("wrong number of values: expected {expected}, got {got}")]
     ColumnCountMismatch { expected: usize, got: usize },
+    #[error("column '{0}' must appear in GROUP BY or be used in an aggregate function")]
+    InvalidAggregate(String),
+    #[error("integer overflow while computing {0}")]
+    Overflow(String),
     #[error("type mismatch for column '{col}': expected {expected}, got {got}")]
     TypeMismatch {
         col: String,
@@ -147,6 +151,16 @@ impl Engine {
             })
             .collect();
 
+        // Schemas of every table in the query (base + joined), used to validate columns.
+        let mut all_schemas = vec![left_schema.clone()];
+        for join in &stmt.joins {
+            all_schemas.push(
+                catalog
+                    .get_schema(&join.table_name)
+                    .map_err(|_| ExecError::TableNotFound(join.table_name.clone()))?,
+            );
+        }
+
         // ── Process each JOIN ─────────────────────────────────────────
         for join in &stmt.joins {
             let right_prefix = format!("row:{}:", join.table_name);
@@ -203,20 +217,17 @@ impl Engine {
             combined_rows.retain(|row| eval_expr(expr, row));
         }
 
+        // ── Aggregates ────────────────────────────────────────────────
+        if let SelectColumns::Items(items) = &stmt.columns {
+            return exec_aggregate(items, &combined_rows, &all_schemas, stmt.limit);
+        }
+
         // ── ORDER BY ──────────────────────────────────────────────────
         if !stmt.order_by.is_empty() {
             combined_rows.sort_by(|a, b| {
                 for clause in &stmt.order_by {
-                    let av = a.get(&clause.column).or_else(|| {
-                        a.keys()
-                            .find(|k| k.ends_with(&format!(".{}", clause.column)))
-                            .and_then(|k| a.get(k))
-                    });
-                    let bv = b.get(&clause.column).or_else(|| {
-                        b.keys()
-                            .find(|k| k.ends_with(&format!(".{}", clause.column)))
-                            .and_then(|k| b.get(k))
-                    });
+                    let av = lookup_column(a, &clause.column);
+                    let bv = lookup_column(b, &clause.column);
                     let ord = compare_json_values(av, bv);
                     let ord = if clause.direction == OrderDirection::Desc {
                         ord.reverse()
@@ -255,6 +266,7 @@ impl Engine {
                         .collect()
                 }
             }
+            SelectColumns::Items(_) => unreachable!("aggregate queries return earlier"),
             SelectColumns::Named(refs) => refs
                 .iter()
                 .map(|r| {
@@ -281,6 +293,7 @@ impl Engine {
                 left_schema.columns.iter().map(|c| c.name.clone()).collect()
             }
             SelectColumns::Named(refs) => refs.iter().map(|r| r.display_name()).collect(),
+            SelectColumns::Items(_) => unreachable!("aggregate queries return earlier"),
             _ => out_col_names.clone(),
         };
 
@@ -428,6 +441,147 @@ fn coerce_value(val: &Value, col_type: &ColType, col_name: &str) -> Result<JsonV
     }
 }
 
+// ── Column lookup ─────────────────────────────────────────────────────────────
+
+/// Find a column in a row by name. Accepts a qualified key (`users.age`) or a bare
+/// column name (`age`), which matches the first `<table>.age` key.
+fn lookup_column<'a>(row: &'a Map<String, JsonValue>, name: &str) -> Option<&'a JsonValue> {
+    row.get(name).or_else(|| {
+        let suffix = format!(".{}", name);
+        row.keys()
+            .find(|k| k.ends_with(&suffix))
+            .and_then(|k| row.get(k))
+    })
+}
+
+fn lookup_ref<'a>(row: &'a Map<String, JsonValue>, col: &ColumnRef) -> Option<&'a JsonValue> {
+    match &col.table {
+        Some(t) => row.get(&format!("{}.{}", t, col.column)),
+        None => lookup_column(row, &col.column),
+    }
+}
+
+/// Error unless `col` exists in at least one of the query's tables.
+fn validate_column(col: &ColumnRef, schemas: &[Schema]) -> Result<()> {
+    let found = schemas.iter().any(|s| {
+        col.table.as_deref().is_none_or(|t| s.table_name == t)
+            && s.column_index(&col.column).is_some()
+    });
+    if found {
+        Ok(())
+    } else {
+        let tables: Vec<&str> = schemas.iter().map(|s| s.table_name.as_str()).collect();
+        Err(ExecError::ColumnNotFound(
+            col.display_name(),
+            tables.join(", "),
+        ))
+    }
+}
+
+// ── Aggregates ────────────────────────────────────────────────────────────────
+
+/// Evaluate a select list of aggregates over all `rows`, producing a single result row.
+fn exec_aggregate(
+    items: &[SelectItem],
+    rows: &[Map<String, JsonValue>],
+    schemas: &[Schema],
+    limit: Option<usize>,
+) -> Result<QueryResult> {
+    let mut columns = Vec::new();
+    let mut cells = Vec::new();
+    for item in items {
+        match item {
+            SelectItem::Column(c) => {
+                return Err(ExecError::InvalidAggregate(c.display_name()));
+            }
+            SelectItem::Aggregate(agg) => {
+                if let AggArg::Column(c) = &agg.arg {
+                    validate_column(c, schemas)?;
+                }
+                columns.push(agg.display_name());
+                cells.push(Some(compute_aggregate(agg, rows)?));
+            }
+        }
+    }
+    let mut out_rows = vec![cells];
+    if limit == Some(0) {
+        out_rows.clear();
+    }
+    Ok(QueryResult {
+        columns,
+        rows: out_rows,
+        message: None,
+    })
+}
+
+/// Compute one aggregate over a set of rows. NULLs are ignored (SQL semantics),
+/// except by `COUNT(*)`. An aggregate over no non-NULL values is `NULL`
+/// (`COUNT` is `0`).
+fn compute_aggregate(agg: &AggregateExpr, rows: &[Map<String, JsonValue>]) -> Result<String> {
+    let col = match &agg.arg {
+        AggArg::Star => return Ok(rows.len().to_string()),
+        AggArg::Column(c) => c,
+    };
+    let values: Vec<&JsonValue> = rows
+        .iter()
+        .filter_map(|r| lookup_ref(r, col))
+        .filter(|v| !v.is_null())
+        .collect();
+
+    match agg.func {
+        AggFunc::Count => Ok(values.len().to_string()),
+        AggFunc::Sum | AggFunc::Avg => {
+            let mut sum: i64 = 0;
+            for v in &values {
+                let n = v.as_i64().ok_or_else(|| ExecError::TypeMismatch {
+                    col: agg.display_name(),
+                    expected: "INTEGER".to_string(),
+                    got: "TEXT".to_string(),
+                })?;
+                sum = sum
+                    .checked_add(n)
+                    .ok_or_else(|| ExecError::Overflow(agg.display_name()))?;
+            }
+            if values.is_empty() {
+                Ok("NULL".to_string())
+            } else if agg.func == AggFunc::Sum {
+                Ok(sum.to_string())
+            } else {
+                Ok(format_float(sum as f64 / values.len() as f64))
+            }
+        }
+        AggFunc::Min | AggFunc::Max => {
+            let best = values.into_iter().reduce(|a, b| {
+                let ord = compare_json_values(Some(a), Some(b));
+                let keep_a = if agg.func == AggFunc::Min {
+                    ord != std::cmp::Ordering::Greater
+                } else {
+                    ord != std::cmp::Ordering::Less
+                };
+                if keep_a {
+                    a
+                } else {
+                    b
+                }
+            });
+            Ok(match best {
+                Some(JsonValue::String(s)) => s.clone(),
+                Some(other) => other.to_string(),
+                None => "NULL".to_string(),
+            })
+        }
+    }
+}
+
+/// `30.0` rather than `30`, so an AVG is visibly not an integer column.
+fn format_float(f: f64) -> String {
+    if f.fract() == 0.0 {
+        format!("{:.1}", f)
+    } else {
+        f.to_string()
+    }
+}
+
 // ── WHERE evaluator ───────────────────────────────────────────────────────────
 
 fn eval_expr(expr: &Expr, row: &Map<String, JsonValue>) -> bool {
@@ -436,11 +590,7 @@ fn eval_expr(expr: &Expr, row: &Map<String, JsonValue>) -> bool {
         Expr::Or(l, r) => eval_expr(l, row) || eval_expr(r, row),
         Expr::Comparison { column, op, value } => {
             // Try both qualified (table.col) and unqualified (col) lookup
-            let row_val = row.get(column).or_else(|| {
-                row.keys()
-                    .find(|k| k.ends_with(&format!(".{}", column)))
-                    .and_then(|k| row.get(k))
-            });
+            let row_val = lookup_column(row, column);
             match row_val {
                 Some(v) => compare(v, op, value),
                 None => false,
@@ -850,6 +1000,178 @@ mod tests {
             .find(|r| r[0] == Some("Bob".to_string()))
             .unwrap();
         assert_eq!(bob_row[1], Some("NULL".to_string()));
+        let _ = std::fs::remove_file(p);
+    }
+
+    fn run_err(engine: &Engine, sql: &str) -> ExecError {
+        let tokens = Lexer::new(sql).tokenize().unwrap();
+        let stmt = Parser::new(tokens).parse().unwrap();
+        engine.execute(stmt).unwrap_err()
+    }
+
+    fn people(engine: &Engine) {
+        run(
+            engine,
+            "CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)",
+        );
+        run(
+            engine,
+            "INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30), (2, 'Bob', 20), (3, 'Carol', 25), (4, 'Dave', NULL)",
+        );
+    }
+
+    fn cell(result: &QueryResult, col: usize) -> String {
+        result.rows[0][col].clone().unwrap()
+    }
+
+    #[test]
+    fn count_star_counts_all_rows() {
+        let (engine, p) = temp_engine();
+        people(&engine);
+        let result = run(&engine, "SELECT COUNT(*) FROM users");
+        assert_eq!(result.columns, vec!["COUNT(*)"]);
+        assert_eq!(cell(&result, 0), "4");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn count_column_ignores_nulls() {
+        let (engine, p) = temp_engine();
+        people(&engine);
+        let result = run(&engine, "SELECT COUNT(age) FROM users");
+        assert_eq!(cell(&result, 0), "3");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn sum_avg_min_max() {
+        let (engine, p) = temp_engine();
+        people(&engine);
+        let result = run(
+            &engine,
+            "SELECT SUM(age), AVG(age), MIN(age), MAX(age) FROM users",
+        );
+        assert_eq!(
+            result.columns,
+            vec!["SUM(age)", "AVG(age)", "MIN(age)", "MAX(age)"]
+        );
+        assert_eq!(cell(&result, 0), "75");
+        assert_eq!(cell(&result, 1), "25.0");
+        assert_eq!(cell(&result, 2), "20");
+        assert_eq!(cell(&result, 3), "30");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn avg_with_fraction() {
+        let (engine, p) = temp_engine();
+        run(&engine, "CREATE TABLE t (n INTEGER)");
+        run(&engine, "INSERT INTO t (n) VALUES (1), (2)");
+        let result = run(&engine, "SELECT AVG(n) FROM t");
+        assert_eq!(cell(&result, 0), "1.5");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn min_max_on_text() {
+        let (engine, p) = temp_engine();
+        people(&engine);
+        let result = run(&engine, "SELECT MIN(name), MAX(name) FROM users");
+        assert_eq!(cell(&result, 0), "Alice");
+        assert_eq!(cell(&result, 1), "Dave");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn aggregate_respects_where() {
+        let (engine, p) = temp_engine();
+        people(&engine);
+        let result = run(
+            &engine,
+            "SELECT COUNT(*), SUM(age) FROM users WHERE age > 20",
+        );
+        assert_eq!(cell(&result, 0), "2");
+        assert_eq!(cell(&result, 1), "55");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn aggregates_on_empty_table() {
+        let (engine, p) = temp_engine();
+        run(&engine, "CREATE TABLE t (n INTEGER)");
+        let result = run(
+            &engine,
+            "SELECT COUNT(*), SUM(n), AVG(n), MIN(n), MAX(n) FROM t",
+        );
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(cell(&result, 0), "0");
+        for i in 1..5 {
+            assert_eq!(cell(&result, i), "NULL");
+        }
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn aggregate_over_join() {
+        let (engine, p) = temp_engine();
+        run(&engine, "CREATE TABLE users (id INTEGER, name TEXT)");
+        run(
+            &engine,
+            "CREATE TABLE orders (id INTEGER, user_id INTEGER, amount INTEGER)",
+        );
+        run(
+            &engine,
+            "INSERT INTO users (id, name) VALUES (1, 'Alice'), (2, 'Bob')",
+        );
+        run(
+            &engine,
+            "INSERT INTO orders (id, user_id, amount) VALUES (1, 1, 100), (2, 1, 200), (3, 2, 50)",
+        );
+        let result = run(
+            &engine,
+            "SELECT COUNT(*), SUM(orders.amount) FROM users INNER JOIN orders ON users.id = orders.user_id",
+        );
+        assert_eq!(cell(&result, 0), "3");
+        assert_eq!(cell(&result, 1), "350");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn plain_column_with_aggregate_is_an_error() {
+        let (engine, p) = temp_engine();
+        people(&engine);
+        let err = run_err(&engine, "SELECT name, COUNT(*) FROM users");
+        assert!(matches!(err, ExecError::InvalidAggregate(_)));
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn sum_on_text_column_is_an_error() {
+        let (engine, p) = temp_engine();
+        people(&engine);
+        let err = run_err(&engine, "SELECT SUM(name) FROM users");
+        assert!(matches!(err, ExecError::TypeMismatch { .. }));
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn aggregate_on_unknown_column_is_an_error() {
+        let (engine, p) = temp_engine();
+        people(&engine);
+        let err = run_err(&engine, "SELECT MAX(salary) FROM users");
+        assert!(matches!(err, ExecError::ColumnNotFound(_, _)));
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn join_with_missing_table_is_an_error() {
+        let (engine, p) = temp_engine();
+        people(&engine);
+        let err = run_err(
+            &engine,
+            "SELECT users.name FROM users INNER JOIN ghosts ON users.id = ghosts.user_id",
+        );
+        assert!(matches!(err, ExecError::TableNotFound(_)));
         let _ = std::fs::remove_file(p);
     }
 }
