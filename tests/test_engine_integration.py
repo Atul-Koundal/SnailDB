@@ -130,3 +130,17 @@ def test_failed_multi_row_insert_is_atomic(db):
     with pytest.raises(RuntimeError):
         db.execute("INSERT INTO t (id) VALUES (1), ('oops')")
     assert db.execute("SELECT * FROM t")["rows"] == []
+
+
+def test_explain_show_describe_through_bridge(db):
+    db.execute("CREATE TABLE t (id INTEGER, name TEXT)")
+    db.execute("CREATE INDEX idx_id ON t (id)")
+    assert db.execute("SHOW TABLES")["rows"] == [["t"]]
+    assert db.execute("DESCRIBE t")["rows"] == [
+        ["id", "INTEGER", "idx_id"],
+        ["name", "TEXT", ""],
+    ]
+    plan = db.execute("EXPLAIN SELECT * FROM t WHERE id = 5")["rows"]
+    assert plan[0] == ["INDEX SCAN t using idx_id (id = 5)"]
+    with pytest.raises(RuntimeError):
+        db.execute("EXPLAIN SELECT * FROM missing")
