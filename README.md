@@ -1,5 +1,10 @@
 # SnailDB
 
+[![CI](https://github.com/Atul-Koundal/SnailDB/actions/workflows/ci.yml/badge.svg)](https://github.com/Atul-Koundal/SnailDB/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Rust](https://img.shields.io/badge/core-Rust-orange)
+![Python](https://img.shields.io/badge/AI%20layer-Python-3776AB)
+
 An AI native SQL database built from scratch in Rust with a Python AI layer. No cloud dependencies, everything runs locally.
 
 ## What is SnailDB
@@ -8,7 +13,7 @@ SnailDB is a from scratch SQL database with an AI layer on top. The Rust core ha
 
 ## Architecture
 
-Three layers that only talk to the layer directly below them.
+Three layers that only talk to the layer directly below them. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full picture.
 
 **snail_core** is the Rust engine. It handles persistent storage via redb, maintains table schemas in a catalog, parses SQL through a hand written lexer and recursive descent parser, and executes queries against real data on disk.
 
@@ -17,37 +22,27 @@ Three layers that only talk to the layer directly below them.
 **snail_cli** is the Python REPL. It connects all three layers and gives you an interactive prompt to run SQL or ask questions in plain English.
 
 ## Project Structure
+
+```
 SnailDB/
-
 ├── snail_core/
-
 │   ├── src/
-
-│   │   ├── storage/       redb key value wrapper
-
-│   │   ├── catalog/       table schema persistence
-
-│   │   ├── sql/           lexer, parser, AST, tokens
-
-│   │   ├── executor/      query execution engine
-
-│   │   └── lib.rs         PyO3 bridge
-
+│   │   ├── storage/     redb key value wrapper
+│   │   ├── catalog/     table schema persistence
+│   │   ├── sql/         lexer, parser, AST, tokens
+│   │   ├── executor/    query execution engine
+│   │   └── lib.rs       PyO3 bridge
 │   └── Cargo.toml
-
 ├── snail_ai/
-
 │   ├── semantic_cache.py  sentence transformer cache
-
 │   ├── ask.py             natural language to SQL
-
 │   └── rl_optimizer.py    Q-learning optimizer
-
 ├── snail_cli/
-
 │   └── main.py            interactive REPL
-
+├── docs/
+│   └── ARCHITECTURE.md
 └── README.md
+```
 
 ## SQL Support
 
@@ -65,13 +60,13 @@ SELECT users.name, orders.amount FROM users LEFT JOIN orders ON users.id = order
 ```
 
 ## Natural Language ASK
+
+```
 ASK show me all users
-
 ASK find users older than 25
-
 ASK get top 3 users ordered by age desc
-
 ASK delete user with id 2
+```
 
 Use `\tables` to register existing tables before using ASK.
 
@@ -88,14 +83,14 @@ A Q-learning agent observes every query execution and learns which strategy work
 Install dependencies:
 
 ```bash
-pip install sentence-transformers maturin
+pip install -r snail_cli/requirements.txt
 ```
 
 Build the Rust extension:
 
 ```bash
 cd snail_core
-source .venv/Scripts/activate
+source .venv/Scripts/activate   # Windows (Git Bash). On Linux/macOS: source .venv/bin/activate
 maturin develop
 ```
 
@@ -109,28 +104,28 @@ python snail_cli/main.py
 ## REPL Commands
 
 | Command | Description |
-|---------|-------------|
+|---|---|
 | Any SQL | Execute SQL directly |
-| ASK question | Natural language query |
-| \tables name1 name2 | Register tables for ASK |
-| \cache | Semantic cache statistics |
-| \rl | RL optimizer statistics |
-| \quit | Exit |
+| `ASK question` | Natural language query |
+| `\tables name1 name2` | Register tables for ASK |
+| `\cache` | Semantic cache statistics |
+| `\rl` | RL optimizer statistics |
+| `\quit` | Exit |
 
-## Test Suite
+## Tests
 
 ```bash
 cd snail_core
 cargo test
 ```
 
-53 tests across storage, catalog, lexer, parser, and executor. All passing.
+Tests cover storage, catalog, lexer, parser, and executor. CI runs formatting, clippy and the full test suite on every push.
 
 ## Stack
 
 | Component | Technology |
-|-----------|------------|
-| Core engine | Rust 1.96 |
+|---|---|
+| Core engine | Rust |
 | Storage | redb 2 |
 | Python bridge | PyO3 0.23 |
 | Build tool | maturin |
@@ -139,10 +134,31 @@ cargo test
 
 ## Version History
 
+See [CHANGELOG.md](CHANGELOG.md).
+
 | Version | Features |
-|---------|----------|
+|---|---|
 | v0.1.0 | Storage, catalog, SQL parser, CREATE INSERT SELECT WHERE, semantic cache, REPL |
 | v0.2.0 | UPDATE, DELETE, ORDER BY, LIMIT |
 | v0.3.0 | INNER JOIN and LEFT JOIN |
 | v0.4.0 | Natural language ASK command |
 | v0.5.0 | Reinforcement learning query optimizer |
+| v0.6.0 | CI, license, contributing guide, architecture docs |
+
+## Roadmap
+
+- v0.7.0 Python tests, cache correctness fix, benchmarks
+- v0.8.0 Aggregates (COUNT, SUM, AVG, MIN, MAX)
+- v0.9.0 GROUP BY and HAVING
+- v0.10.0 CREATE INDEX and index-aware lookups
+- v0.11.0 Transactions (BEGIN, COMMIT, ROLLBACK)
+- v0.12.0 EXPLAIN and optional local-LLM ASK
+- v1.0.0 Polish and release
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+MIT, see [LICENSE](LICENSE).
