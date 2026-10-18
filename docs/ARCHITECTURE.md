@@ -41,6 +41,8 @@ SQL string -> Lexer -> Vec<Token> -> Parser -> Stmt (AST) -> Engine::execute -> 
 
 For `SELECT`: scan base table -> apply joins -> `WHERE` -> `ORDER BY` -> `LIMIT` -> project columns.
 
+For aggregate selects (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`) the pipeline is: scan base table -> joins -> `WHERE` -> aggregate over the remaining rows. Aggregate names are parsed as functions only when followed by `(`, so they are not reserved words.
+
 Rows are held as flat maps of `"table.column" -> JSON value`, which lets joins and qualified or unqualified column references share one code path.
 
 ## snail_ai

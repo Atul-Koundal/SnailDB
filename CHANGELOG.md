@@ -3,6 +3,18 @@
 All notable changes to SnailDB are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.0]
+
+### Added
+- Aggregate functions `COUNT(*)`, `COUNT(col)`, `SUM`, `AVG`, `MIN`, `MAX`, usable with `WHERE` and over joins.
+- SQL semantics: NULLs are ignored by every aggregate except `COUNT(*)`; aggregates over an empty set return `NULL` (`COUNT` returns `0`); `SUM`/`AVG` on a TEXT column is a type error.
+- `ASK` understands aggregate questions ("how many users", "average age of users").
+- Joining a table that does not exist is now a clear `TableNotFound` error instead of silently returning no rows.
+
+### Changed
+- Aggregate names are not keywords, so columns named `count` or `max` keep working.
+- Refactored duplicated column lookup into a shared `lookup_column` helper.
+
 ## [0.7.0]
 
 ### Added

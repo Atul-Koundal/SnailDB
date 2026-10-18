@@ -60,7 +60,10 @@ UPDATE users SET age = 31 WHERE id = 1
 DELETE FROM users WHERE id = 2
 SELECT users.name, orders.amount FROM users INNER JOIN orders ON users.id = orders.user_id
 SELECT users.name, orders.amount FROM users LEFT JOIN orders ON users.id = orders.user_id
+SELECT COUNT(*), AVG(age), MAX(age) FROM users WHERE age > 18
 ```
+
+Aggregates: `COUNT(*)`, `COUNT(col)`, `SUM`, `AVG`, `MIN`, `MAX`. NULLs are ignored except by `COUNT(*)`; an aggregate over no rows is `NULL` (`COUNT` is `0`).
 
 ## Natural Language ASK
 
@@ -69,6 +72,8 @@ ASK show me all users
 ASK find users older than 25
 ASK get top 3 users ordered by age desc
 ASK delete user with id 2
+ASK how many users are older than 25
+ASK what is the average age of users
 ```
 
 Use `\tables` to register existing tables before using ASK.
@@ -165,10 +170,10 @@ See [CHANGELOG.md](CHANGELOG.md).
 | v0.5.0 | Reinforcement learning query optimizer |
 | v0.6.0 | CI, license, contributing guide, architecture docs |
 | v0.7.0 | Python tests, cache correctness fix, benchmarks |
+| v0.8.0 | Aggregates: COUNT, SUM, AVG, MIN, MAX |
 
 ## Roadmap
 
-- v0.8.0 Aggregates (COUNT, SUM, AVG, MIN, MAX)
 - v0.9.0 GROUP BY and HAVING
 - v0.10.0 CREATE INDEX and index-aware lookups
 - v0.11.0 Transactions (BEGIN, COMMIT, ROLLBACK)
