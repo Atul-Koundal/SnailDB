@@ -165,6 +165,8 @@ impl<'a> Lexer<'a> {
             "LEFT" => Token::Left,
             "RIGHT" => Token::Right,
             "ON" => Token::On,
+            "GROUP" => Token::Group,
+            "HAVING" => Token::Having,
             _ => Token::Ident(word.to_string()),
         }
     }
@@ -245,5 +247,12 @@ mod tests {
         assert!(tokens.contains(&Token::Join));
         assert!(tokens.contains(&Token::On));
         assert!(tokens.contains(&Token::Dot));
+    }
+
+    #[test]
+    fn group_by_having_keywords() {
+        let tokens = lex("SELECT age FROM t GROUP BY age HAVING COUNT(*) > 1");
+        assert!(tokens.contains(&Token::Group));
+        assert!(tokens.contains(&Token::Having));
     }
 }

@@ -15,6 +15,8 @@ pub enum ParseError {
     UnknownStatement(Token),
     #[error("invalid ON condition: expected table.column = table.column")]
     InvalidOnCondition,
+    #[error("HAVING conditions must compare an aggregate, e.g. HAVING COUNT(*) > 1")]
+    HavingNeedsAggregate,
     #[error("{0}(*) is not valid: only COUNT accepts *")]
     StarOnlyForCount(String),
 }
@@ -233,13 +235,41 @@ impl Parser {
             None
         };
 
+        // GROUP BY
+        let mut group_by = Vec::new();
+        if self.peek() == Some(&Token::Group) {
+            self.advance();
+            self.expect(&Token::By)?;
+            loop {
+                group_by.push(self.parse_column_ref()?);
+                match self.peek() {
+                    Some(Token::Comma) => {
+                        self.advance();
+                    }
+                    _ => break,
+                }
+            }
+        }
+
+        // HAVING
+        let having = if self.peek() == Some(&Token::Having) {
+            self.advance();
+            Some(self.parse_having_or()?)
+        } else {
+            None
+        };
+
         // ORDER BY
         let mut order_by = Vec::new();
         if self.peek() == Some(&Token::Order) {
             self.advance();
             self.expect(&Token::By)?;
             loop {
-                let column = self.expect_ident()?;
+                // An aggregate (`ORDER BY COUNT(*) DESC`) is stored by its header name.
+                let column = match self.parse_select_item()? {
+                    SelectItem::Aggregate(agg) => agg.display_name(),
+                    SelectItem::Column(c) => c.column,
+                };
                 let direction = match self.peek() {
                     Some(Token::Asc) => {
                         self.advance();
@@ -283,6 +313,8 @@ impl Parser {
             columns,
             joins,
             where_clause,
+            group_by,
+            having,
             order_by,
             limit,
         }))
@@ -387,6 +419,38 @@ impl Parser {
             table_name,
             where_clause,
         }))
+    }
+
+    // HAVING uses standard precedence: AND binds tighter than OR.
+    fn parse_having_or(&mut self) -> Result<HavingExpr> {
+        let mut left = self.parse_having_and()?;
+        while self.peek() == Some(&Token::Or) {
+            self.advance();
+            let right = self.parse_having_and()?;
+            left = HavingExpr::Or(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn parse_having_and(&mut self) -> Result<HavingExpr> {
+        let mut left = self.parse_having_comparison()?;
+        while self.peek() == Some(&Token::And) {
+            self.advance();
+            let right = self.parse_having_comparison()?;
+            left = HavingExpr::And(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn parse_having_comparison(&mut self) -> Result<HavingExpr> {
+        match self.parse_select_item()? {
+            SelectItem::Aggregate(agg) => {
+                let op = self.parse_cmp_op()?;
+                let value = self.parse_value()?;
+                Ok(HavingExpr::Comparison { agg, op, value })
+            }
+            SelectItem::Column(_) => Err(ParseError::HavingNeedsAggregate),
+        }
     }
 
     fn parse_expr(&mut self) -> Result<Expr> {
@@ -727,5 +791,70 @@ mod tests {
             Parser::new(tokens).parse(),
             Err(ParseError::StarOnlyForCount(_))
         ));
+    }
+
+    #[test]
+    fn parse_group_by_single_and_multiple() {
+        match parse("SELECT age, COUNT(*) FROM users GROUP BY age") {
+            Stmt::Select(s) => assert_eq!(s.group_by.len(), 1),
+            _ => panic!("wrong stmt"),
+        }
+        match parse("SELECT a, b, COUNT(*) FROM t GROUP BY a, t.b") {
+            Stmt::Select(s) => {
+                assert_eq!(s.group_by.len(), 2);
+                assert_eq!(s.group_by[1].table, Some("t".to_string()));
+            }
+            _ => panic!("wrong stmt"),
+        }
+    }
+
+    #[test]
+    fn parse_having() {
+        match parse("SELECT age FROM users GROUP BY age HAVING COUNT(*) > 1") {
+            Stmt::Select(s) => assert!(matches!(
+                s.having,
+                Some(HavingExpr::Comparison { op: CmpOp::Gt, .. })
+            )),
+            _ => panic!("wrong stmt"),
+        }
+    }
+
+    #[test]
+    fn parse_having_precedence_and_binds_tighter_than_or() {
+        let sql = "SELECT a FROM t GROUP BY a HAVING COUNT(*) > 1 OR SUM(b) > 5 AND MAX(b) < 9";
+        match parse(sql) {
+            Stmt::Select(s) => match s.having {
+                Some(HavingExpr::Or(_, right)) => {
+                    assert!(matches!(*right, HavingExpr::And(_, _)))
+                }
+                other => panic!("expected OR at the top, got {:?}", other),
+            },
+            _ => panic!("wrong stmt"),
+        }
+    }
+
+    #[test]
+    fn having_requires_an_aggregate() {
+        let tokens = Lexer::new("SELECT a FROM t GROUP BY a HAVING a > 1")
+            .tokenize()
+            .unwrap();
+        assert!(matches!(
+            Parser::new(tokens).parse(),
+            Err(ParseError::HavingNeedsAggregate)
+        ));
+    }
+
+    #[test]
+    fn parse_order_by_aggregate() {
+        let sql = "SELECT a, COUNT(*) FROM t GROUP BY a ORDER BY COUNT(*) DESC, a ASC LIMIT 3";
+        match parse(sql) {
+            Stmt::Select(s) => {
+                assert_eq!(s.order_by[0].column, "COUNT(*)");
+                assert_eq!(s.order_by[0].direction, OrderDirection::Desc);
+                assert_eq!(s.order_by[1].column, "a");
+                assert_eq!(s.limit, Some(3));
+            }
+            _ => panic!("wrong stmt"),
+        }
     }
 }

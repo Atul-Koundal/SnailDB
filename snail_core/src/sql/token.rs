@@ -26,6 +26,8 @@ pub enum Token {
     Left,
     Right,
     On,
+    Group,
+    Having,
 
     // ── Identifiers & literals ────────────────────────────────────────
     Ident(String),

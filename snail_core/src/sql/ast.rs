@@ -40,8 +40,22 @@ pub struct SelectStmt {
     pub columns: SelectColumns,
     pub joins: Vec<JoinClause>,
     pub where_clause: Option<Expr>,
+    pub group_by: Vec<ColumnRef>,
+    pub having: Option<HavingExpr>,
     pub order_by: Vec<OrderByClause>,
     pub limit: Option<usize>,
+}
+
+/// Condition of a HAVING clause: comparisons of aggregates combined with AND / OR.
+#[derive(Debug, Clone)]
+pub enum HavingExpr {
+    Comparison {
+        agg: AggregateExpr,
+        op: CmpOp,
+        value: Value,
+    },
+    And(Box<HavingExpr>, Box<HavingExpr>),
+    Or(Box<HavingExpr>, Box<HavingExpr>),
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +183,7 @@ pub struct JoinCondition {
 
 #[derive(Debug, Clone)]
 pub struct OrderByClause {
+    /// A column name, or for grouped queries the header of an aggregate such as `COUNT(*)`.
     pub column: String,
     pub direction: OrderDirection,
 }
