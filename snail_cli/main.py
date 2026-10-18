@@ -19,11 +19,11 @@ BANNER = r"""
  ____) | | | | (_| | | || |_| | |_) |
 |_____/|_| |_|\__,_|_|_||____/|____/
 
-SnailDB v0.12.0 — slow and steady, smart and ready
+SnailDB v1.0.0 — slow and steady, smart and ready
 Type SQL to query. Type ASK <question> for natural language.
 Tables are discovered automatically; \tables <name> registers extra ones.
 Start with --llm to let ASK fall back to a local LLM (Ollama).
-Type \cache for cache stats. Type \quit to exit.
+Type \help for commands. Type \quit to exit.
 """
 
 
@@ -58,6 +58,26 @@ def print_result(result: dict):
 
     count = len(rows)
     print(f"\n  {count} row{'s' if count != 1 else ''} returned.")
+
+
+HELP = """
+  SQL
+    CREATE TABLE t (id INTEGER, name TEXT)      CREATE INDEX idx ON t (col)
+    INSERT INTO t (id, name) VALUES (1, 'a')    UPDATE t SET col = v WHERE ...
+    SELECT ... [JOIN] [WHERE] [GROUP BY] [HAVING] [ORDER BY] [LIMIT]
+    DELETE FROM t WHERE ...
+    BEGIN / COMMIT / ROLLBACK                   EXPLAIN <select|update|delete>
+    SHOW TABLES                                 DESCRIBE t
+
+  Natural language
+    ASK how many users per age                  (add --llm for a local-LLM fallback)
+
+  REPL
+    \\help      this text
+    \\tables    list known tables; \\tables name registers extra ones
+    \\cache     semantic cache statistics
+    \\quit      exit
+"""
 
 
 def discover_tables(db) -> list[str]:
@@ -105,7 +125,8 @@ def main():
 
     while True:
         try:
-            user_input = input("snaildb> ").strip()
+            prompt = "snaildb*> " if cache.in_transaction else "snaildb> "
+            user_input = input(prompt).strip()
         except (EOFError, KeyboardInterrupt):
             print("\nBye!")
             break
@@ -116,6 +137,10 @@ def main():
         if user_input.lower() in ("\\quit", "\\q", "exit", "quit"):
             print("Bye!")
             break
+
+        if user_input.lower() in ("\\help", "\\h", "help"):
+            print(HELP)
+            continue
 
         if user_input.lower() == "\\cache":
             print(f"  {cache.stats()}")
