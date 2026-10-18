@@ -29,10 +29,20 @@ pub struct Column {
     pub col_type: ColType,
 }
 
+/// A secondary index on one column.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IndexDef {
+    pub name: String,
+    pub column: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Schema {
     pub table_name: String,
     pub columns: Vec<Column>,
+    /// `default` keeps schemas written before indexes existed readable.
+    #[serde(default)]
+    pub indexes: Vec<IndexDef>,
 }
 
 impl Schema {
@@ -40,6 +50,7 @@ impl Schema {
         Schema {
             table_name: table_name.to_string(),
             columns,
+            indexes: Vec::new(),
         }
     }
 
@@ -92,6 +103,16 @@ impl<'a> Catalog<'a> {
         }
         let bytes = serde_json::to_vec(&schema)?;
         self.storage.put(&key, &bytes)?;
+        Ok(())
+    }
+
+    /// Overwrite the stored schema of an existing table (used to register indexes).
+    pub fn save_schema(&self, schema: &Schema) -> Result<()> {
+        let key = catalog_key(&schema.table_name);
+        if self.storage.get(&key)?.is_none() {
+            return Err(CatalogError::TableNotFound(schema.table_name.clone()));
+        }
+        self.storage.put(&key, &serde_json::to_vec(schema)?)?;
         Ok(())
     }
 
@@ -241,5 +262,36 @@ mod tests {
         assert_eq!(schema.column_index("id"), Some(0));
         assert_eq!(schema.column_index("name"), Some(1));
         assert_eq!(schema.column_index("age"), None);
+    }
+
+    #[test]
+    fn old_schema_without_indexes_still_loads() {
+        let (storage, p) = temp_storage();
+        // A schema written by v0.9 and earlier has no "indexes" field.
+        storage
+            .put(
+                b"catalog:legacy",
+                br#"{"table_name":"legacy","columns":[{"name":"id","col_type":"Integer"}]}"#,
+            )
+            .unwrap();
+        let schema = Catalog::new(&storage).get_schema("legacy").unwrap();
+        assert!(schema.indexes.is_empty());
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn save_schema_persists_indexes() {
+        let (storage, p) = temp_storage();
+        let catalog = Catalog::new(&storage);
+        catalog.create_table(make_schema("users")).unwrap();
+        let mut schema = catalog.get_schema("users").unwrap();
+        schema.indexes.push(IndexDef {
+            name: "idx_name".to_string(),
+            column: "name".to_string(),
+        });
+        catalog.save_schema(&schema).unwrap();
+        assert_eq!(catalog.get_schema("users").unwrap().indexes.len(), 1);
+        assert!(catalog.save_schema(&make_schema("ghost")).is_err());
+        let _ = std::fs::remove_file(p);
     }
 }

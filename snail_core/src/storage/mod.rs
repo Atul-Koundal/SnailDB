@@ -76,6 +76,21 @@ impl Storage {
         Ok(results)
     }
 
+    /// All entries with `start <= key < end`, in key order.
+    pub fn scan_range(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(KV_TABLE)?;
+        let mut results = Vec::new();
+        if start >= end {
+            return Ok(results);
+        }
+        for entry in table.range(start..end)? {
+            let (k, v) = entry?;
+            results.push((k.value().to_vec(), v.value().to_vec()));
+        }
+        Ok(results)
+    }
+
     pub fn delete_prefix(&self, prefix: &[u8]) -> Result<usize> {
         let keys: Vec<Vec<u8>> = self
             .scan_prefix(prefix)?
@@ -136,6 +151,23 @@ mod tests {
         assert_eq!(r.len(), 2);
         assert_eq!(r[0].1, b"alice");
         assert_eq!(r[1].1, b"bob");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn scan_range_is_half_open_and_ordered() {
+        let (s, p) = temp_storage();
+        for k in ["a", "b", "c", "d"] {
+            s.put(k.as_bytes(), b"v").unwrap();
+        }
+        let keys: Vec<Vec<u8>> = s
+            .scan_range(b"b", b"d")
+            .unwrap()
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(keys, vec![b"b".to_vec(), b"c".to_vec()]);
+        assert!(s.scan_range(b"d", b"b").unwrap().is_empty());
         let _ = std::fs::remove_file(p);
     }
 
