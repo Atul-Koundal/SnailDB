@@ -10,26 +10,48 @@ class AskTranslator:
       2. Semantic similarity fallback using query history
     """
 
-    def __init__(self):
+    def __init__(self, llm=None):
         # History of (natural_language, sql) pairs for similarity fallback
         self.history: list[dict] = []
+        # Optional LLMTranslator (see llm_ask.py), used when the rules do not match.
+        self.llm = llm
+        # How the last successful translation was produced: "rules", "llm" or "history".
+        self.last_source: Optional[str] = None
 
-    def translate(self, question: str, known_tables: list[str]) -> Optional[str]:
+    def translate(
+        self,
+        question: str,
+        known_tables: list[str],
+        schemas: Optional[dict] = None,
+    ) -> Optional[str]:
         """
         Translate a natural language question to SQL.
+        Order: rules -> local LLM (if configured) -> similar past question.
+        `schemas` ({table: [(column, type), ...]}) gives the LLM its context.
         Returns the SQL string or None if translation failed.
         """
         q = question.strip().lower()
+        self.last_source = None
 
         # Try rule-based first
         sql = self._rule_based(q, known_tables)
         if sql:
             self.history.append({"question": question, "sql": sql})
+            self.last_source = "rules"
             return sql
+
+        # Then the local LLM, if one is configured
+        if self.llm is not None:
+            sql = self.llm.translate(question, schemas)
+            if sql:
+                self.history.append({"question": question, "sql": sql})
+                self.last_source = "llm"
+                return sql
 
         # Fallback: find most similar past question
         sql = self._similarity_fallback(q)
         if sql:
+            self.last_source = "history"
             return sql
 
         return None
