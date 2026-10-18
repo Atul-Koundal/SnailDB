@@ -1,3 +1,17 @@
+# Rust
 /snail_core/target
 /snail_core/.venv
+
+# Database files
 *.redb
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
