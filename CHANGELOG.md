@@ -3,6 +3,21 @@
 All notable changes to SnailDB are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.11.0]
+
+### Added
+- Transactions: `BEGIN`, `COMMIT`, `ROLLBACK`. Writes are buffered inside `Storage`; reads inside the transaction see them (including through indexes); `COMMIT` applies everything in a single atomic redb transaction; `ROLLBACK` discards the buffer. DDL (`CREATE TABLE`, `CREATE INDEX`) is transactional too.
+- Every write statement is now atomic. A multi-row `INSERT` that fails halfway no longer leaves the earlier rows behind. Inside an explicit transaction a failed statement is undone but the transaction stays open.
+- `BEGIN` inside a transaction, and `COMMIT`/`ROLLBACK` outside one, are clear errors.
+- The semantic cache bypasses caching while a transaction is open and clears itself on `BEGIN`, `COMMIT` and `ROLLBACK`.
+
+### Changed
+- A write statement is now one durable commit instead of one per row, so bulk inserts are much faster.
+
+### Notes
+- Closing the database with a transaction still open discards it (equivalent to `ROLLBACK`).
+- Isolation: SnailDB is single-connection; there is no concurrent-transaction handling.
+
 ## [0.10.0]
 
 ### Added

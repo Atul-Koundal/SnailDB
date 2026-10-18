@@ -73,6 +73,15 @@ SELECT * FROM users WHERE age >= 30     -- uses the index
 
 An index on an INTEGER or TEXT column speeds up `=`, `<`, `<=`, `>`, `>=` in `WHERE` for `SELECT`, `UPDATE` and `DELETE`. Results are identical with or without it.
 
+```sql
+BEGIN
+INSERT INTO accounts (id, balance) VALUES (1, 100)
+UPDATE accounts SET balance = 50 WHERE id = 1
+ROLLBACK        -- or COMMIT
+```
+
+Transactions buffer writes until `COMMIT`, which applies them in one atomic step. Every single write statement is atomic as well, so a failing multi-row `INSERT` leaves nothing behind.
+
 With `GROUP BY`, every selected column must be a grouping column or an aggregate. `HAVING` filters groups, and `ORDER BY` can sort by an aggregate.
 
 ## Natural Language ASK
@@ -184,10 +193,10 @@ See [CHANGELOG.md](CHANGELOG.md).
 | v0.8.0 | Aggregates: COUNT, SUM, AVG, MIN, MAX |
 | v0.9.0 | GROUP BY, HAVING, ORDER BY aggregate |
 | v0.10.0 | CREATE INDEX and index-aware lookups |
+| v0.11.0 | Transactions: BEGIN, COMMIT, ROLLBACK; atomic statements |
 
 ## Roadmap
 
-- v0.11.0 Transactions (BEGIN, COMMIT, ROLLBACK)
 - v0.12.0 EXPLAIN and optional local-LLM ASK
 - v1.0.0 Polish and release
 

@@ -40,6 +40,12 @@ An index entry's key embeds an order-preserving encoding of the value: integers 
 
 The planner (`choose_index`) looks only at AND-ed conditions, prefers equality, and ignores `!=`, NULL comparisons and anything under an OR. An index only narrows the candidate rows; the full WHERE is still evaluated, and candidates are sorted by row id, so results never depend on whether an index was used.
 
+### Transactions
+
+`Storage` keeps an optional in-memory write buffer (`key -> Some(value) | None`). While a transaction is open, `put` and `delete` go to the buffer, and `get`, `scan_prefix` and `scan_range` read the database with the buffer layered on top. `COMMIT` writes the whole buffer in one redb write transaction (atomic and durable); `ROLLBACK` drops it.
+
+The engine also wraps every write statement in an implicit transaction and takes a snapshot of the buffer first. If the statement fails, the snapshot is restored, so a statement is all-or-nothing, and inside an explicit transaction a failed statement does not abort the rest of it.
+
 ### Query pipeline
 
 ```
