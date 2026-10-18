@@ -144,3 +144,19 @@ def test_explain_show_describe_through_bridge(db):
     assert plan[0] == ["INDEX SCAN t using idx_id (id = 5)"]
     with pytest.raises(RuntimeError):
         db.execute("EXPLAIN SELECT * FROM missing")
+
+
+def test_oversized_integer_is_an_error_not_a_crash(db):
+    db.execute("CREATE TABLE t (n INTEGER)")
+    with pytest.raises(RuntimeError, match="out of range"):
+        db.execute("INSERT INTO t (n) VALUES (99999999999999999999)")
+
+
+def test_quote_escaping_and_where_precedence(db):
+    db.execute("CREATE TABLE p (name TEXT, age INTEGER)")
+    db.execute("INSERT INTO p (name, age) VALUES ('O''Brien', 40), ('Bob', 20), ('Carol', 25)")
+    assert db.execute("SELECT name FROM p WHERE name = 'O''Brien'")["rows"] == [["O'Brien"]]
+    rows = db.execute(
+        "SELECT name FROM p WHERE name = 'Carol' OR age = 20 AND name = 'O''Brien'"
+    )["rows"]
+    assert rows == [["Carol"]]
