@@ -511,28 +511,40 @@ impl Parser {
         }
     }
 
+    // WHERE expressions use standard SQL precedence: AND binds tighter than OR,
+    // and parentheses override it.
     fn parse_expr(&mut self) -> Result<Expr> {
-        self.parse_and()
+        self.parse_or()
+    }
+
+    fn parse_or(&mut self) -> Result<Expr> {
+        let mut left = self.parse_and()?;
+        while self.peek() == Some(&Token::Or) {
+            self.advance();
+            let right = self.parse_and()?;
+            left = Expr::Or(Box::new(left), Box::new(right));
+        }
+        Ok(left)
     }
 
     fn parse_and(&mut self) -> Result<Expr> {
-        let mut left = self.parse_or()?;
+        let mut left = self.parse_primary()?;
         while self.peek() == Some(&Token::And) {
             self.advance();
-            let right = self.parse_or()?;
+            let right = self.parse_primary()?;
             left = Expr::And(Box::new(left), Box::new(right));
         }
         Ok(left)
     }
 
-    fn parse_or(&mut self) -> Result<Expr> {
-        let mut left = self.parse_comparison()?;
-        while self.peek() == Some(&Token::Or) {
+    fn parse_primary(&mut self) -> Result<Expr> {
+        if self.peek() == Some(&Token::LParen) {
             self.advance();
-            let right = self.parse_comparison()?;
-            left = Expr::Or(Box::new(left), Box::new(right));
+            let inner = self.parse_expr()?;
+            self.expect(&Token::RParen)?;
+            return Ok(inner);
         }
-        Ok(left)
+        self.parse_comparison()
     }
 
     fn parse_comparison(&mut self) -> Result<Expr> {
@@ -974,6 +986,43 @@ mod tests {
             Err(ParseError::ExplainUnsupported)
         ));
         let tokens = Lexer::new("SHOW columns").tokenize().unwrap();
+        assert!(Parser::new(tokens).parse().is_err());
+    }
+
+    #[test]
+    fn where_and_binds_tighter_than_or() {
+        match parse("SELECT * FROM t WHERE a = 1 OR b = 2 AND c = 3") {
+            Stmt::Select(s) => match s.where_clause {
+                Some(Expr::Or(_, right)) => assert!(matches!(*right, Expr::And(_, _))),
+                other => panic!("expected OR at the top, got {:?}", other),
+            },
+            _ => panic!("wrong stmt"),
+        }
+        match parse("SELECT * FROM t WHERE a = 1 AND b = 2 OR c = 3") {
+            Stmt::Select(s) => match s.where_clause {
+                Some(Expr::Or(left, _)) => assert!(matches!(*left, Expr::And(_, _))),
+                other => panic!("expected OR at the top, got {:?}", other),
+            },
+            _ => panic!("wrong stmt"),
+        }
+    }
+
+    #[test]
+    fn where_parentheses_override_precedence() {
+        match parse("SELECT * FROM t WHERE (a = 1 OR b = 2) AND c = 3") {
+            Stmt::Select(s) => match s.where_clause {
+                Some(Expr::And(left, _)) => assert!(matches!(*left, Expr::Or(_, _))),
+                other => panic!("expected AND at the top, got {:?}", other),
+            },
+            _ => panic!("wrong stmt"),
+        }
+    }
+
+    #[test]
+    fn unbalanced_parenthesis_is_an_error() {
+        let tokens = Lexer::new("SELECT * FROM t WHERE (a = 1")
+            .tokenize()
+            .unwrap();
         assert!(Parser::new(tokens).parse().is_err());
     }
 }

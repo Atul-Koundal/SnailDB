@@ -5,6 +5,8 @@ use thiserror::Error;
 pub enum LexerError {
     #[error("unexpected character '{0}' at position {1}")]
     UnexpectedChar(char, usize),
+    #[error("integer literal '{0}' is out of range")]
+    NumberOutOfRange(String),
     #[error("unterminated string literal")]
     UnterminatedString,
 }
@@ -59,7 +61,7 @@ impl<'a> Lexer<'a> {
             return self.read_string();
         }
         if ch.is_ascii_digit() || (ch == '-' && self.next_is_digit()) {
-            return Ok(self.read_number());
+            return self.read_number();
         }
         if ch.is_alphabetic() || ch == '_' {
             return Ok(self.read_ident_or_keyword());
@@ -108,7 +110,7 @@ impl<'a> Lexer<'a> {
         matches!(chars.next(), Some(c) if c.is_ascii_digit())
     }
 
-    fn read_number(&mut self) -> Token {
+    fn read_number(&mut self) -> Result<Token> {
         let start = self.pos;
         if self.peek() == Some('-') {
             self.advance();
@@ -116,17 +118,27 @@ impl<'a> Lexer<'a> {
         while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
             self.advance();
         }
-        let n: i64 = self.input[start..self.pos].parse().unwrap();
-        Token::IntLiteral(n)
+        let text = &self.input[start..self.pos];
+        text.parse::<i64>()
+            .map(Token::IntLiteral)
+            .map_err(|_| LexerError::NumberOutOfRange(text.to_string()))
     }
 
+    /// Reads `'...'`. A doubled quote inside the literal (`'it''s'`) is an escaped quote.
     fn read_string(&mut self) -> Result<Token> {
         self.advance();
         let mut s = String::new();
         loop {
             match self.advance() {
                 None => return Err(LexerError::UnterminatedString),
-                Some('\'') => break,
+                Some('\'') => {
+                    if self.peek() == Some('\'') {
+                        self.advance();
+                        s.push('\'');
+                    } else {
+                        break;
+                    }
+                }
                 Some(c) => s.push(c),
             }
         }
@@ -282,5 +294,36 @@ mod tests {
         assert_eq!(lex("explain")[0], Token::Explain);
         assert_eq!(lex("SHOW tables")[0], Token::Show);
         assert_eq!(lex("describe users")[0], Token::Describe);
+    }
+
+    #[test]
+    fn doubled_quote_is_an_escaped_quote() {
+        assert_eq!(lex("'it''s'"), vec![Token::TextLiteral("it's".to_string())]);
+        assert_eq!(lex("''"), vec![Token::TextLiteral(String::new())]);
+        assert_eq!(lex("''''"), vec![Token::TextLiteral("'".to_string())]);
+    }
+
+    #[test]
+    fn unterminated_string_after_escape_is_an_error() {
+        assert!(matches!(
+            Lexer::new("'it''s").tokenize(),
+            Err(LexerError::UnterminatedString)
+        ));
+    }
+
+    #[test]
+    fn out_of_range_integer_is_an_error_not_a_panic() {
+        assert!(matches!(
+            Lexer::new("99999999999999999999").tokenize(),
+            Err(LexerError::NumberOutOfRange(_))
+        ));
+        assert_eq!(
+            lex("9223372036854775807"),
+            vec![Token::IntLiteral(i64::MAX)]
+        );
+        assert_eq!(
+            lex("-9223372036854775808"),
+            vec![Token::IntLiteral(i64::MIN)]
+        );
     }
 }

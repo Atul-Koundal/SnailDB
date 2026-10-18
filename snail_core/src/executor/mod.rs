@@ -222,10 +222,10 @@ impl Engine {
         let mut combined_rows: Vec<Map<String, JsonValue>> = raw_left
             .into_iter()
             .map(|(_, bytes)| {
-                let obj: Map<String, JsonValue> = serde_json::from_slice(&bytes).unwrap();
-                qualify_row(&stmt.table_name, obj)
+                let obj: Map<String, JsonValue> = serde_json::from_slice(&bytes)?;
+                Ok(qualify_row(&stmt.table_name, obj))
             })
-            .collect();
+            .collect::<Result<_>>()?;
 
         // Schemas of every table in the query (base + joined), used to validate columns.
         let mut all_schemas = vec![left_schema.clone()];
@@ -244,10 +244,10 @@ impl Engine {
             let right_rows: Vec<Map<String, JsonValue>> = raw_right
                 .into_iter()
                 .map(|(_, bytes)| {
-                    let obj: Map<String, JsonValue> = serde_json::from_slice(&bytes).unwrap();
-                    qualify_row(&join.table_name, obj)
+                    let obj: Map<String, JsonValue> = serde_json::from_slice(&bytes)?;
+                    Ok(qualify_row(&join.table_name, obj))
                 })
-                .collect();
+                .collect::<Result<_>>()?;
 
             let left_key = format!("{}.{}", join.on.left_table, join.on.left_col);
             let right_key = format!("{}.{}", join.on.right_table, join.on.right_col);
@@ -2725,6 +2725,56 @@ mod tests {
         assert!(matches!(
             run_err(&engine, "DESCRIBE ghosts"),
             ExecError::TableNotFound(_)
+        ));
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn where_precedence_end_to_end() {
+        let (engine, p) = temp_engine();
+        people(&engine);
+        // Carol is not in `people`; use Alice(30), Bob(20), Carol(25) from a fresh table
+        run(&engine, "CREATE TABLE p (name TEXT, age INTEGER)");
+        run(
+            &engine,
+            "INSERT INTO p (name, age) VALUES ('Alice', 30), ('Bob', 20), ('Carol', 25)",
+        );
+        // AND binds tighter: Carol OR (age 20 AND Alice) -> only Carol
+        let r = run(
+            &engine,
+            "SELECT name FROM p WHERE name = 'Carol' OR age = 20 AND name = 'Alice'",
+        );
+        assert_eq!(col(&r, 0), vec!["Carol"]);
+        // parentheses change the answer: (Carol OR age 20) AND Alice -> nobody
+        let r = run(
+            &engine,
+            "SELECT name FROM p WHERE (name = 'Carol' OR age = 20) AND name = 'Alice'",
+        );
+        assert!(r.rows.is_empty());
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn quotes_round_trip_through_insert_and_where() {
+        let (engine, p) = temp_engine();
+        run(&engine, "CREATE TABLE t (s TEXT)");
+        run(&engine, "INSERT INTO t (s) VALUES ('it''s'), ('plain')");
+        let r = run(&engine, "SELECT s FROM t WHERE s = 'it''s'");
+        assert_eq!(col(&r, 0), vec!["it's"]);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn corrupt_row_is_an_error_not_a_panic() {
+        let (engine, p) = temp_engine();
+        run(&engine, "CREATE TABLE t (a INTEGER)");
+        engine
+            .storage
+            .put(b"row:t:00000000000000000001", b"not json")
+            .unwrap();
+        assert!(matches!(
+            run_err(&engine, "SELECT * FROM t"),
+            ExecError::Json(_)
         ));
         let _ = std::fs::remove_file(p);
     }
